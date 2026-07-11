@@ -50,6 +50,27 @@ const getLLMSnapshot = (state: GameState): LLMSnapshot => {
   };
 };
 
+function isRoleMatching(devRole: string, title: string, desc: string): boolean {
+  if (devRole === 'fullstack') return true;
+  
+  const content = (title + ' ' + desc).toLowerCase();
+  
+  switch (devRole) {
+    case 'frontend':
+      return /frontend|ui|ux|widget|css|html|react|component|button|page|modal|styles|layout/i.test(content);
+    case 'backend':
+      return /backend|api|auth|login|server|service|route|controller|endpoints|session|jwt/i.test(content);
+    case 'dba':
+      return /database|db|query|sql|migration|postgres|pool|index|queries|schema/i.test(content);
+    case 'devops':
+      return /devops|ci|cd|pipeline|docker|aws|deploy|actions|kubernetes|infra|infrastructure|host/i.test(content);
+    case 'ml':
+      return /ml|ai|model|training|recommendation|prediction|neural|prompt|llm/i.test(content);
+    default:
+      return true;
+  }
+}
+
 export default function GamePage() {
   const [state, setState] = useState<GameState>(MOCK_GAME_STATE);
   const [modal, setModal] = useState<Modal>('none');
@@ -94,10 +115,113 @@ export default function GamePage() {
         pushLine({ type: 'output', text: '  /hire                 - Open the developer hiring dashboard' });
         pushLine({ type: 'output', text: '  /pause                - Pause simulated game time' });
         pushLine({ type: 'output', text: '  /resume               - Resume simulated game time' });
+        pushLine({ type: 'output', text: '  /raise <name> <amt>   - Give a developer a monthly raise to boost morale' });
+        pushLine({ type: 'output', text: '  /bonus <name> <amt>   - Give a developer a one-time cash bonus to boost morale' });
         pushLine({ type: 'output', text: '  /settings             - View current LLM simulator configurations' });
         pushLine({ type: 'output', text: '  /settings <key> <val> - Change configurations (keys: endpoint, apiKey, model, interval, turns)' });
         pushLine({ type: 'output', text: '  /help                 - Display this commands directory' });
         break;
+
+      case '/raise': {
+        if (parts.length < 3) {
+          pushLine({ type: 'error', text: 'Usage: /raise <developer_name> <monthly_increase_amount>' });
+          break;
+        }
+        const search = parts[1].toLowerCase();
+        const amount = parseInt(parts[2], 10);
+        if (isNaN(amount) || amount <= 0) {
+          pushLine({ type: 'error', text: 'Error: Invalid raise amount. Must be a positive number.' });
+          break;
+        }
+
+        setState(prev => {
+          const devIdx = prev.developers.findIndex(d => 
+            d.id.toLowerCase() === search || d.name.toLowerCase().includes(search)
+          );
+          if (devIdx === -1) {
+            return {
+              ...prev,
+              terminalHistory: [...prev.terminalHistory, { type: 'error', text: `Error: Developer "${parts[1]}" not found.`, timestamp: Date.now() }]
+            };
+          }
+          
+          const dev = prev.developers[devIdx];
+          const newSalary = dev.salary + amount;
+          const newMorale = Math.min(100, dev.morale + Math.round((amount / 100) * 4));
+          
+          const updatedDevs = prev.developers.map((d, idx) => 
+            idx === devIdx ? { ...d, salary: newSalary, morale: newMorale } : d
+          );
+          
+          const monthlyBurnRate = updatedDevs.reduce((sum, d) => sum + d.salary, 0);
+          const runway = prev.finances.cash / Math.max(monthlyBurnRate - prev.finances.monthlyRevenue + prev.finances.activePenalties, 1);
+          
+          return {
+            ...prev,
+            developers: updatedDevs,
+            finances: {
+              ...prev.finances,
+              monthlyBurnRate,
+              runway
+            },
+            terminalHistory: [...prev.terminalHistory, { type: 'event', text: `Day ${prev.currentDay} — Gave ${dev.name} a $${amount}/mo raise. New salary: $${newSalary}/mo. Morale: ${newMorale}%`, timestamp: Date.now() }]
+          };
+        });
+        break;
+      }
+
+      case '/bonus': {
+        if (parts.length < 3) {
+          pushLine({ type: 'error', text: 'Usage: /bonus <developer_name> <one_time_amount>' });
+          break;
+        }
+        const search = parts[1].toLowerCase();
+        const amount = parseInt(parts[2], 10);
+        if (isNaN(amount) || amount <= 0) {
+          pushLine({ type: 'error', text: 'Error: Invalid bonus amount. Must be a positive number.' });
+          break;
+        }
+
+        setState(prev => {
+          const devIdx = prev.developers.findIndex(d => 
+            d.id.toLowerCase() === search || d.name.toLowerCase().includes(search)
+          );
+          if (devIdx === -1) {
+            return {
+              ...prev,
+              terminalHistory: [...prev.terminalHistory, { type: 'error', text: `Error: Developer "${parts[1]}" not found.`, timestamp: Date.now() }]
+            };
+          }
+          
+          const dev = prev.developers[devIdx];
+          if (prev.finances.cash < amount) {
+            return {
+              ...prev,
+              terminalHistory: [...prev.terminalHistory, { type: 'error', text: 'Error: Insufficient cash reserves to pay this bonus.', timestamp: Date.now() }]
+            };
+          }
+
+          const newMorale = Math.min(100, dev.morale + Math.round((amount / 500) * 5));
+          const updatedDevs = prev.developers.map((d, idx) => 
+            idx === devIdx ? { ...d, morale: newMorale } : d
+          );
+          
+          const newCash = prev.finances.cash - amount;
+          const runway = newCash / Math.max(prev.finances.monthlyBurnRate - prev.finances.monthlyRevenue + prev.finances.activePenalties, 1);
+          
+          return {
+            ...prev,
+            developers: updatedDevs,
+            finances: {
+              ...prev.finances,
+              cash: newCash,
+              runway
+            },
+            terminalHistory: [...prev.terminalHistory, { type: 'event', text: `Day ${prev.currentDay} — Paid ${dev.name} a $${amount.toLocaleString()} cash bonus. Morale: ${newMorale}%`, timestamp: Date.now() }]
+          };
+        });
+        break;
+      }
 
       case '/settings': {
         if (parts.length === 1) {
@@ -241,6 +365,73 @@ export default function GamePage() {
     }
   }, [state.candidates, pushLine]);
 
+  const handleAssignDeveloper = useCallback((ticketId: string, developerId: string | null) => {
+    setState(prev => {
+      // Find the ticket first to check its status
+      const ticket = prev.tickets.find(t => t.id === ticketId);
+      if (!ticket) return prev;
+
+      // 1. Update developers
+      const updatedDevs = prev.developers.map(d => {
+        // If this developer is being assigned to the ticket
+        if (developerId && d.id === developerId) {
+          return { ...d, currentTicketId: ticketId };
+        }
+        // If this developer was previously assigned to this ticket, unassign them
+        if (d.currentTicketId === ticketId) {
+          return { ...d, currentTicketId: null };
+        }
+        return d;
+      });
+
+      // 2. Update tickets: set assignedTo and change status to 'in_progress' if assigned, or 'todo' if unassigned
+      const updatedTickets = prev.tickets.map(t => {
+        if (t.id !== ticketId) return t;
+
+        const newStatus = developerId ? ('in_progress' as const) : ('todo' as const);
+        return {
+          ...t,
+          assignedTo: developerId,
+          status: newStatus,
+        };
+      });
+
+      // Recalculate finances
+      const activePenalties = updatedTickets
+        .filter(t => t.type === 'bug' && t.status !== 'done')
+        .reduce((sum, t) => sum + t.revenuePenalty, 0);
+
+      const monthlyRevenue = updatedTickets
+        .filter(t => t.status === 'done')
+        .reduce((sum, t) => sum + t.revenueIncrease, 0);
+
+      const monthlyBurnRate = updatedDevs.reduce((sum, d) => sum + d.salary, 0);
+      const runway = prev.finances.cash / Math.max(monthlyBurnRate - monthlyRevenue + activePenalties, 1);
+
+      const dev = prev.developers.find(d => d.id === developerId);
+      const newTerminalLines: TerminalLine[] = [];
+      if (developerId && dev) {
+        newTerminalLines.push({ type: 'event', text: `Assigned ${dev.name} to ticket "${ticket.title}"`, timestamp: Date.now() });
+      } else {
+        newTerminalLines.push({ type: 'event', text: `Unassigned ticket "${ticket.title}"`, timestamp: Date.now() });
+      }
+
+      return {
+        ...prev,
+        developers: updatedDevs,
+        tickets: updatedTickets,
+        finances: {
+          ...prev.finances,
+          activePenalties,
+          monthlyRevenue,
+          monthlyBurnRate,
+          runway,
+        },
+        terminalHistory: [...prev.terminalHistory, ...newTerminalLines]
+      };
+    });
+  }, []);
+
   const stateRef = useRef(state);
   useEffect(() => {
     stateRef.current = state;
@@ -267,38 +458,78 @@ export default function GamePage() {
         // Process developer work
         let updatedTickets = [...prev.tickets];
         let updatedDevs = prev.developers.map(dev => {
-          if (!dev.currentTicketId) return dev;
+          if (!dev.currentTicketId) {
+            // Recover morale by 2 points per day
+            const newMorale = Math.min(100, dev.morale + 2);
+            return { ...dev, morale: newMorale };
+          }
           
           const ticketIdx = updatedTickets.findIndex(t => t.id === dev.currentTicketId);
-          if (ticketIdx === -1) return { ...dev, currentTicketId: null };
+          if (ticketIdx === -1) {
+            return { ...dev, currentTicketId: null, morale: Math.min(100, dev.morale + 2) };
+          }
           
           const ticket = updatedTickets[ticketIdx];
-          if (ticket.status !== 'in_progress') return dev;
+          if (ticket.status !== 'in_progress') {
+            const newMorale = Math.min(100, dev.morale + 2);
+            return { ...dev, morale: newMorale };
+          }
 
-          const nextProgress = ticket.progressPoints + dev.velocity;
+          // Active work progress and morale decay
+          const prevMorale = dev.morale;
+          let decayRate = 0;
+          if (ticket.type === 'bug' && ticket.severity === 'critical') {
+            decayRate = 3;
+          } else if (ticket.severity === 'high') {
+            decayRate = 1;
+          }
+
+          const newMorale = Math.max(0, prevMorale - decayRate);
+          
+          if (prevMorale >= 30 && newMorale < 30) {
+            newTerminalLines.push({
+              type: 'error',
+              text: `Warning: ${dev.name}'s morale is critical (${newMorale})!`,
+              timestamp: Date.now(),
+            });
+          }
+
+          // Calculate effective velocity
+          let baseVelocity = dev.velocity * (newMorale / 100);
+          if (!isRoleMatching(dev.role, ticket.title, ticket.description)) {
+            baseVelocity *= 0.5;
+          }
+          const effectiveVelocity = Math.max(1, Math.round(baseVelocity));
+
+          const nextProgress = ticket.progressPoints + effectiveVelocity;
           if (nextProgress >= ticket.storyPoints) {
             // Complete ticket
             updatedTickets[ticketIdx] = {
               ...ticket,
               status: 'done',
               progressPoints: ticket.storyPoints,
-              assignedTo: null,
             };
             
+            let moraleBoost = 0;
+            if (ticket.type === 'feature' && ticket.severity === 'low') {
+              moraleBoost = 10;
+            }
+            const finalMorale = Math.min(100, newMorale + moraleBoost);
+
             newTerminalLines.push({
               type: 'event',
               text: `Day ${newDay} — Completed ${ticket.type === 'bug' ? 'bug' : ticket.type === 'tech_debt' ? 'tech debt' : 'feature'}: "${ticket.title}" (+$${ticket.revenueIncrease}/mo MRR)`,
               timestamp: Date.now(),
             });
             
-            return { ...dev, currentTicketId: null };
+            return { ...dev, currentTicketId: null, morale: finalMorale };
           } else {
             // Progress ticket
             updatedTickets[ticketIdx] = {
               ...ticket,
               progressPoints: nextProgress,
             };
-            return dev;
+            return { ...dev, morale: newMorale };
           }
         });
 
@@ -598,8 +829,10 @@ export default function GamePage() {
         {modal === 'kanban' && (
           <KanbanBoard
             tickets={state.tickets}
+            developers={state.developers}
             onClose={() => setModal('none')}
             onMoveTicket={handleMoveTicket}
+            onAssignDeveloper={handleAssignDeveloper}
           />
         )}
         {modal === 'hire' && (

@@ -1,9 +1,11 @@
-import { Ticket, TicketType, TicketSeverity, TicketStatus } from '@/lib/types';
+import { Ticket, TicketType, TicketSeverity, TicketStatus, Developer } from '@/lib/types';
 
 interface KanbanBoardProps {
   tickets: Ticket[];
+  developers: Developer[];
   onClose: () => void;
   onMoveTicket: (ticketId: string, newStatus: TicketStatus) => void;
+  onAssignDeveloper: (ticketId: string, developerId: string | null) => void;
 }
 
 const columns: { key: TicketStatus; label: string; color: string }[] = [
@@ -32,7 +34,17 @@ const severityColor: Record<TicketSeverity, string> = {
   critical: '#ff4466',
 };
 
-function TicketCard({ ticket, onMove }: { ticket: Ticket; onMove: (id: string, status: TicketStatus) => void }) {
+function TicketCard({
+  ticket,
+  developers,
+  onMove,
+  onAssignDeveloper,
+}: {
+  ticket: Ticket;
+  developers: Developer[];
+  onMove: (id: string, status: TicketStatus) => void;
+  onAssignDeveloper: (ticketId: string, developerId: string | null) => void;
+}) {
   const tc = typeColor[ticket.type];
   const canMoveLeft  = ticket.status !== 'backlog';
   const canMoveRight = ticket.status !== 'done';
@@ -93,6 +105,44 @@ function TicketCard({ ticket, onMove }: { ticket: Ticket; onMove: (id: string, s
         </div>
       )}
 
+      {/* Assigned Developer Selection */}
+      {ticket.status !== 'done' && ticket.status !== 'backlog' && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
+          <span style={{ color: '#718096', fontSize: 10, letterSpacing: '0.05em' }}>ASSIGNED TO</span>
+          <select
+            value={ticket.assignedTo || ''}
+            onChange={e => onAssignDeveloper(ticket.id, e.target.value || null)}
+            style={{
+              background: '#161922',
+              border: '1px solid #2d3748',
+              borderRadius: 4,
+              color: '#e2e8f0',
+              fontSize: 11,
+              padding: '3px 6px',
+              outline: 'none',
+              fontFamily: 'inherit',
+              cursor: 'pointer',
+              width: '100%',
+            }}
+          >
+            <option value="">Unassigned</option>
+            {developers.map(dev => (
+              <option key={dev.id} value={dev.id}>
+                {dev.name} ({dev.role.toUpperCase()}){dev.currentTicketId && dev.currentTicketId !== ticket.id ? ' — Busy' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
+      {/* Completed by info */}
+      {ticket.status === 'done' && ticket.assignedTo && (
+        <div style={{ color: '#718096', fontSize: 10, display: 'flex', alignItems: 'center', gap: 4, marginTop: 4 }}>
+          <span>👤</span>
+          <span>Completed by {developers.find(d => d.id === ticket.assignedTo)?.name || 'Former Dev'}</span>
+        </div>
+      )}
+
       {/* Move buttons */}
       <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
         {canMoveLeft && (
@@ -125,7 +175,7 @@ function TicketCard({ ticket, onMove }: { ticket: Ticket; onMove: (id: string, s
   );
 }
 
-export default function KanbanBoard({ tickets, onClose, onMoveTicket }: KanbanBoardProps) {
+export default function KanbanBoard({ tickets, developers, onClose, onMoveTicket, onAssignDeveloper }: KanbanBoardProps) {
   return (
     <div
       style={{
@@ -202,7 +252,13 @@ export default function KanbanBoard({ tickets, onClose, onMoveTicket }: KanbanBo
               {/* Cards */}
               <div style={{ overflowY: 'auto', flex: 1, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {colTickets.map(ticket => (
-                  <TicketCard key={ticket.id} ticket={ticket} onMove={onMoveTicket} />
+                  <TicketCard
+                    key={ticket.id}
+                    ticket={ticket}
+                    developers={developers}
+                    onMove={onMoveTicket}
+                    onAssignDeveloper={onAssignDeveloper}
+                  />
                 ))}
                 {colTickets.length === 0 && (
                   <div style={{ color: '#2d3748', fontSize: 11, textAlign: 'center', marginTop: 20 }}>
