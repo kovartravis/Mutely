@@ -39,6 +39,7 @@ export default function RecentEvents({ terminalHistory }: RecentEventsProps) {
 
   return (
     <div
+      className="recent-events-panel"
       style={{
         background: '#161922',
         border: '1px solid #1e2433',
@@ -46,8 +47,6 @@ export default function RecentEvents({ terminalHistory }: RecentEventsProps) {
         display: 'flex',
         flexDirection: 'column',
         overflow: 'hidden',
-        width: '38%',
-        flexShrink: 0,
       }}
     >
       {/* Panel Header */}

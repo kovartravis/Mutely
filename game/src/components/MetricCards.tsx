@@ -20,12 +20,11 @@ interface CardProps {
 function MetricCard({ label, value, sub, color, icon, glowClass }: CardProps) {
   return (
     <div
-      className={glowClass}
+      className={`${glowClass} metric-card`}
       style={{
         background: '#161922',
         border: `1px solid ${color}30`,
         borderRadius: 10,
-        padding: '14px 18px',
         flex: 1,
         minWidth: 0,
         display: 'flex',
@@ -52,7 +51,7 @@ export default function MetricCards({ finances }: MetricCardsProps) {
   const netFlow = monthlyRevenue - activePenalties - monthlyBurnRate;
 
   return (
-    <div style={{ display: 'flex', gap: 12 }}>
+    <div className="metrics-grid">
       <MetricCard
         label="CASH"
         value={fmt(cash)}

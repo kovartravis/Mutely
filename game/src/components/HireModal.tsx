@@ -35,7 +35,7 @@ export default function HireModal({ candidates, onClose, onHire }: HireModalProp
   return (
     <div
       style={{
-        position: 'absolute', inset: 0, zIndex: 50,
+        position: 'fixed', inset: 0, zIndex: 50,
         background: '#0d0f14e8',
         backdropFilter: 'blur(4px)',
         display: 'flex',
@@ -43,7 +43,10 @@ export default function HireModal({ candidates, onClose, onHire }: HireModalProp
       }}
     >
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', padding: '14px 24px', borderBottom: '1px solid #1e2433', gap: 12 }}>
+      <div
+        className="modal-header"
+        style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #1e2433', gap: 12 }}
+      >
         <span style={{ color: '#00ff88', fontSize: 14, letterSpacing: '0.1em', fontWeight: 700 }}>
           👤 HIRING BOARD
         </span>
@@ -62,7 +65,17 @@ export default function HireModal({ candidates, onClose, onHire }: HireModalProp
       </div>
 
       {/* Candidate Grid */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: 24, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: 16, alignContent: 'start' }}>
+      <div
+        className="candidate-grid"
+        style={{
+          flex: 1,
+          overflowY: 'auto',
+          display: 'grid',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+          gap: 16,
+          alignContent: 'start',
+        }}
+      >
         {candidates.length === 0 && (
           <div style={{ color: '#4a5568', fontSize: 13, gridColumn: '1/-1', textAlign: 'center', marginTop: 40 }}>
             No applicants yet. The LLM will surface candidates over time.

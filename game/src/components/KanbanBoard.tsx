@@ -129,7 +129,7 @@ export default function KanbanBoard({ tickets, onClose, onMoveTicket }: KanbanBo
   return (
     <div
       style={{
-        position: 'absolute', inset: 0, zIndex: 50,
+        position: 'fixed', inset: 0, zIndex: 50,
         background: '#0d0f14e8',
         backdropFilter: 'blur(4px)',
         display: 'flex',
@@ -138,8 +138,9 @@ export default function KanbanBoard({ tickets, onClose, onMoveTicket }: KanbanBo
     >
       {/* Modal Header */}
       <div
+        className="modal-header"
         style={{
-          display: 'flex', alignItems: 'center', padding: '14px 24px',
+          display: 'flex', alignItems: 'center',
           borderBottom: '1px solid #1e2433', gap: 12,
         }}
       >
@@ -161,14 +162,17 @@ export default function KanbanBoard({ tickets, onClose, onMoveTicket }: KanbanBo
       </div>
 
       {/* Columns */}
-      <div style={{ display: 'flex', gap: 0, flex: 1, overflow: 'hidden' }}>
+      <div
+        className="kanban-columns"
+        style={{ display: 'flex', gap: 0, flex: 1 }}
+      >
         {columns.map((col, ci) => {
           const colTickets = tickets.filter(t => t.status === col.key);
           return (
             <div
               key={col.key}
+              className="kanban-column"
               style={{
-                flex: 1,
                 borderRight: ci < columns.length - 1 ? '1px solid #1e2433' : 'none',
                 display: 'flex',
                 flexDirection: 'column',

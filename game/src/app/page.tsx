@@ -206,12 +206,11 @@ export default function GamePage() {
 
   return (
     <div
+      className="app-container"
       style={{
-        height: '100vh',
         display: 'flex',
         flexDirection: 'column',
         position: 'relative',
-        overflow: 'hidden',
       }}
     >
       {/* Header */}
@@ -223,12 +222,10 @@ export default function GamePage() {
 
       {/* Main Content */}
       <main
+        className="main-content"
         style={{
-          flex: 1,
-          overflow: 'hidden',
           display: 'flex',
           flexDirection: 'column',
-          padding: '14px 18px',
           gap: 12,
           position: 'relative',
         }}
@@ -237,7 +234,7 @@ export default function GamePage() {
         <MetricCards finances={state.finances} />
 
         {/* Team + Events Row */}
-        <div style={{ display: 'flex', gap: 12, flex: 1, overflow: 'hidden', minHeight: 0 }}>
+        <div className="main-content-row">
           <TeamPanel developers={state.developers} tickets={state.tickets} />
           <RecentEvents terminalHistory={state.terminalHistory} />
         </div>

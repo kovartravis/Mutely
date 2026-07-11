@@ -179,7 +179,10 @@ export default function Terminal({ history, onCommand }: TerminalProps) {
         </div>
 
         {/* Hint */}
-        <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0 }}>
+        <div
+          className="terminal-hints"
+          style={{ display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0 }}
+        >
           {COMMANDS.map(cmd => (
             <span key={cmd} style={{ color: '#2d3748', fontSize: 10, letterSpacing: '0.05em' }}>
               {cmd}

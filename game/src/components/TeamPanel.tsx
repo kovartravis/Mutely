@@ -43,6 +43,7 @@ export default function TeamPanel({ developers, tickets }: TeamPanelProps) {
 
   return (
     <div
+      className="team-panel"
       style={{
         background: '#161922',
         border: '1px solid #1e2433',
@@ -50,7 +51,6 @@ export default function TeamPanel({ developers, tickets }: TeamPanelProps) {
         overflow: 'hidden',
         display: 'flex',
         flexDirection: 'column',
-        flex: 1,
       }}
     >
       {/* Panel Header */}
@@ -60,27 +60,30 @@ export default function TeamPanel({ developers, tickets }: TeamPanelProps) {
         <span style={{ marginLeft: 'auto', color: '#4a5568', fontSize: 11 }}>{developers.length} devs</span>
       </div>
 
-      {/* Table Header */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '160px 100px 70px 1fr 180px',
-          padding: '7px 16px',
-          borderBottom: '1px solid #1a1f2e',
-          color: '#4a5568',
-          fontSize: 10,
-          letterSpacing: '0.12em',
-        }}
-      >
-        <span>NAME</span>
-        <span>ROLE</span>
-        <span>LEVEL</span>
-        <span>MORALE</span>
-        <span>WORKING ON</span>
-      </div>
+      {/* Scrollable container for the table */}
+      <div style={{ overflowX: 'auto', display: 'flex', flexDirection: 'column', flex: 1 }}>
+        <div style={{ minWidth: 620, display: 'flex', flexDirection: 'column', flex: 1 }}>
+          {/* Table Header */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '140px 90px 60px 140px 1fr',
+              padding: '7px 16px',
+              borderBottom: '1px solid #1a1f2e',
+              color: '#4a5568',
+              fontSize: 10,
+              letterSpacing: '0.12em',
+            }}
+          >
+            <span>NAME</span>
+            <span>ROLE</span>
+            <span>LEVEL</span>
+            <span>MORALE</span>
+            <span>WORKING ON</span>
+          </div>
 
-      {/* Rows */}
-      <div style={{ overflowY: 'auto', flex: 1 }}>
+          {/* Rows */}
+          <div style={{ overflowY: 'auto', flex: 1 }}>
         {developers.map((dev) => {
           const working = getTicketTitle(dev.currentTicketId);
           const isActive = !!working;
@@ -92,7 +95,7 @@ export default function TeamPanel({ developers, tickets }: TeamPanelProps) {
               key={dev.id}
               style={{
                 display: 'grid',
-                gridTemplateColumns: '160px 100px 70px 1fr 180px',
+                gridTemplateColumns: '140px 90px 60px 140px 1fr',
                 padding: '9px 16px',
                 borderBottom: '1px solid #11141a',
                 alignItems: 'center',
@@ -144,6 +147,8 @@ export default function TeamPanel({ developers, tickets }: TeamPanelProps) {
             </div>
           );
         })}
+          </div>
+        </div>
       </div>
     </div>
   );

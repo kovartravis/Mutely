@@ -23,13 +23,13 @@ export default function Header({ companyName, currentDay, gameStatus }: HeaderPr
 
   return (
     <header
+      className="app-header"
       style={{
         background: '#0d0f14',
         borderBottom: '1px solid #1e2433',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
-        padding: '0 20px',
         height: '44px',
         flexShrink: 0,
         position: 'relative',
