@@ -50,6 +50,37 @@ const getLLMSnapshot = (state: GameState): LLMSnapshot => {
   };
 };
 
+function getGameCriticalInstructions(state: GameState): string {
+  let contextNotes = '';
+  
+  const openTicketsCount = state.tickets.filter(t => t.status !== 'done').length;
+  const hasCriticalBugs = state.tickets.some(t => t.type === 'bug' && t.severity === 'critical' && t.status !== 'done');
+  const teamSize = state.developers.length;
+  const cash = state.finances.cash;
+  const runway = state.finances.runway;
+  
+  if (cash < 50000 || runway < 1.0) {
+    contextNotes += `- [STATUS] Cash reserves are low. Trigger a <market_event> to inject cash, or a developer candidate <dev_applied> to recruit help.\n`;
+  }
+  if (hasCriticalBugs) {
+    contextNotes += `- [STATUS] The system has active critical bugs. Developers working on them will suffer morale decay. Generate developer candidates or simulate developer resignations via <dev_quit> to reflect staff strain.\n`;
+  }
+  if (openTicketsCount === 0) {
+    contextNotes += `- [STATUS] The backlog is empty. You MUST generate at least one new feature or tech debt ticket using <add_ticket title="..." type="feature" severity="medium" storyPoints="5" revenueIncrease="800" />.\n`;
+  }
+  if (teamSize === 1 && openTicketsCount > 2) {
+    contextNotes += `- [STATUS] The team size is extremely small relative to the backlog workload. You MUST output a developer application using <dev_applied> to recruit help.\n`;
+  }
+  
+  return `
+<CRITICAL_INSTRUCTION>
+- You MUST output a short narrative paragraph summarizing your analysis, followed by one or more action tags.
+- Always output actual XML action tags (e.g. <add_ticket ... /> or <dev_applied ... />). Ensure all tags are properly formed and terminated with a closing slash before the bracket (/>).
+- Do NOT output tickets with identical titles to the ones already open.
+${contextNotes || '- Continue normal simulator operations, generating balanced features, tech debt, bug alerts, or market events.'}
+</CRITICAL_INSTRUCTION>`;
+}
+
 function isRoleMatching(devRole: string, title: string, desc: string): boolean {
   if (devRole === 'fullstack') return true;
   
@@ -603,9 +634,10 @@ export default function GamePage() {
 
     try {
       const snapshot = getLLMSnapshot(currentState);
+      const criticalInstructions = getGameCriticalInstructions(currentState);
       const messages = [
         { role: 'system', content: systemPrompt || DEFAULT_SYSTEM_PROMPT },
-        { role: 'user', content: JSON.stringify(snapshot, null, 2) }
+        { role: 'user', content: JSON.stringify(snapshot, null, 2) + '\n\n' + criticalInstructions }
       ];
 
       const response = await fetch('/api/proxy', {
