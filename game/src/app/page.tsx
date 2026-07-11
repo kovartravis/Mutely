@@ -76,7 +76,7 @@ function getGameCriticalInstructions(state: GameState): string {
 <CRITICAL_INSTRUCTION>
 - You MUST output a short narrative paragraph summarizing your analysis, followed by one or more action tags.
 - Always output actual XML action tags (e.g. <add_ticket ... /> or <dev_applied ... />). Ensure all tags are properly formed and terminated with a closing slash before the bracket (/>).
-- Do NOT output tickets with identical titles to the ones already open.
+- Do NOT output tickets with identical or similar titles to any tickets that are already open or completed (done).
 ${contextNotes || '- Continue normal simulator operations, generating balanced features, tech debt, bug alerts, or market events.'}
 </CRITICAL_INSTRUCTION>`;
 }
@@ -680,8 +680,13 @@ export default function GamePage() {
         parsedActions.forEach(action => {
           switch (action.type) {
             case 'add_ticket': {
+              const payload = action.payload;
+              const exists = updatedTickets.some(t => t.title.toLowerCase().trim() === payload.title.toLowerCase().trim());
+              if (exists) {
+                break;
+              }
               const newTicket = {
-                ...action.payload,
+                ...payload,
                 id: `t-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
                 status: 'backlog' as const,
                 assignedTo: null,
@@ -696,8 +701,13 @@ export default function GamePage() {
               break;
             }
             case 'add_bug_ticket': {
+              const payload = action.payload;
+              const exists = updatedTickets.some(t => t.title.toLowerCase().trim() === payload.title.toLowerCase().trim());
+              if (exists) {
+                break;
+              }
               const newBug = {
-                ...action.payload,
+                ...payload,
                 id: `t-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
                 status: 'todo' as const,
                 assignedTo: null,
