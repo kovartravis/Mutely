@@ -39,9 +39,9 @@ export const MOCK_GAME_STATE: GameState = {
   loopHistory: [],
 
   llmConfig: {
-    endpoint: 'https://api.openai.com/v1/chat/completions',
+    endpoint: 'http://192.168.1.104:11434/v1/chat/completions',
     apiKey: '',
-    model: 'gpt-4o-mini',
+    model: 'qwen2.5-coder-7b-instruct-4bit',
     loopIntervalMs: 15000,
     contextTurns: 5,
     systemPrompt: '',
