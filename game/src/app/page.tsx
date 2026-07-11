@@ -52,12 +52,81 @@ export default function GamePage() {
         break;
 
       case '/help':
-        pushLine({ type: 'output', text: 'Commands: /hire  /backlog  /pause  /resume  /settings  /help' });
+        pushLine({ type: 'output', text: 'Available commands:' });
+        pushLine({ type: 'output', text: '  /backlog              - Open the interactive Kanban backlog board' });
+        pushLine({ type: 'output', text: '  /hire                 - Open the developer hiring dashboard' });
+        pushLine({ type: 'output', text: '  /pause                - Pause simulated game time' });
+        pushLine({ type: 'output', text: '  /resume               - Resume simulated game time' });
+        pushLine({ type: 'output', text: '  /settings             - View current LLM simulator configurations' });
+        pushLine({ type: 'output', text: '  /settings <key> <val> - Change configurations (keys: endpoint, apiKey, model, interval, turns)' });
+        pushLine({ type: 'output', text: '  /help                 - Display this commands directory' });
         break;
 
-      case '/settings':
-        pushLine({ type: 'output', text: 'Settings coming soon. Edit llmConfig in game state.' });
+      case '/settings': {
+        if (parts.length === 1) {
+          pushLine({ type: 'output', text: 'Current LLM Configuration:' });
+          pushLine({ type: 'output', text: `  endpoint: ${state.llmConfig.endpoint || '(not set)'}` });
+          pushLine({ type: 'output', text: `  apiKey:   ${state.llmConfig.apiKey ? '••••••••••••' : '(not set)'}` });
+          pushLine({ type: 'output', text: `  model:    ${state.llmConfig.model || '(not set)'}` });
+          pushLine({ type: 'output', text: `  interval: ${state.llmConfig.loopIntervalMs}ms` });
+          pushLine({ type: 'output', text: `  turns:    ${state.llmConfig.contextTurns}` });
+          pushLine({ type: 'output', text: 'Update setting using: /settings <key> <value> (e.g. /settings model gpt-4o)' });
+        } else {
+          const key = parts[1];
+          const value = cmd.trim().slice(cmd.indexOf(key) + key.length).trim();
+          
+          if (!value) {
+            pushLine({ type: 'error', text: `Error: Missing value for setting key "${key}"` });
+            break;
+          }
+
+          let updatedKey = '';
+          let parsedValue: any = value;
+          let isValid = true;
+
+          if (key === 'endpoint') {
+            updatedKey = 'endpoint';
+          } else if (key === 'apikey' || key === 'api_key') {
+            updatedKey = 'apiKey';
+          } else if (key === 'model') {
+            updatedKey = 'model';
+          } else if (key === 'interval' || key === 'loopintervalms') {
+            const ms = parseInt(value, 10);
+            if (isNaN(ms) || ms <= 0) {
+              pushLine({ type: 'error', text: `Error: Invalid interval value "${value}" (must be positive number)` });
+              isValid = false;
+            } else {
+              updatedKey = 'loopIntervalMs';
+              parsedValue = ms;
+            }
+          } else if (key === 'turns' || key === 'contextturns') {
+            const turns = parseInt(value, 10);
+            if (isNaN(turns) || turns < 0) {
+              pushLine({ type: 'error', text: `Error: Invalid turns value "${value}" (must be 0 or positive)` });
+              isValid = false;
+            } else {
+              updatedKey = 'contextTurns';
+              parsedValue = turns;
+            }
+          } else {
+            pushLine({ type: 'error', text: `Error: Unknown settings key "${key}". Supported: endpoint, apiKey, model, interval, turns` });
+            isValid = false;
+          }
+
+          if (isValid && updatedKey) {
+            setState(prev => ({
+              ...prev,
+              llmConfig: {
+                ...prev.llmConfig,
+                [updatedKey]: parsedValue
+              }
+            }));
+            const displayVal = updatedKey === 'apiKey' ? '••••••••••••' : value;
+            pushLine({ type: 'output', text: `Setting "${updatedKey}" successfully updated to: ${displayVal}` });
+          }
+        }
         break;
+      }
 
       default:
         pushLine({ type: 'error', text: `Unknown command: "${cmd}". Type /help for available commands.` });
