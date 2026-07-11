@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { MOCK_GAME_STATE } from '@/lib/mockData';
-import { GameState, TicketStatus, TerminalLine, LLMSnapshot, LoopTurn, GameStatus } from '@/lib/types';
+import { GameState, TicketStatus, TerminalLine, LLMSnapshot, LoopTurn, GameStatus, LLMAction } from '@/lib/types';
 import { parseLLMResponse } from '@/lib/parser';
 import Header from '@/components/Header';
 import MetricCards from '@/components/MetricCards';
@@ -469,6 +469,7 @@ export default function GamePage() {
   }, [state]);
 
   const isLLMLoopRunningRef = useRef(false);
+  const isRegeneratingRef = useRef(false);
 
   // Core day-ticking loop
   useEffect(() => {
@@ -477,6 +478,7 @@ export default function GamePage() {
     const interval = setInterval(() => {
       setState(prev => {
         if (prev.gameStatus !== 'running') return prev;
+        if (isRegeneratingRef.current) return prev;
 
         const newDay = prev.currentDay + 1;
         let newCash = prev.finances.cash;
@@ -625,201 +627,244 @@ export default function GamePage() {
 
     const { endpoint, apiKey, model, systemPrompt } = currentState.llmConfig;
     if (!endpoint) {
-      pushLine({ type: 'error', text: 'LLM Loop Error: Endpoint is not configured in settings.' });
+      pushLine({ type: 'error', text: 'LLM Loop Error: Endpoint is not configured.' });
       return;
     }
 
     isLLMLoopRunningRef.current = true;
     pushLine({ type: 'output', text: 'Consulting AI Board Advisor...' });
 
-    try {
-      const snapshot = getLLMSnapshot(currentState);
-      const criticalInstructions = getGameCriticalInstructions(currentState);
-      const messages = [
-        { role: 'system', content: systemPrompt || DEFAULT_SYSTEM_PROMPT },
-        { role: 'user', content: JSON.stringify(snapshot, null, 2) + '\n\n' + criticalInstructions }
-      ];
+    let currentMessages = [
+      { role: 'system', content: systemPrompt || DEFAULT_SYSTEM_PROMPT },
+      { role: 'user', content: JSON.stringify(getLLMSnapshot(currentState), null, 2) + '\n\n' + getGameCriticalInstructions(currentState) }
+    ];
 
-      const response = await fetch('/api/proxy', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          endpoint,
-          headers: apiKey ? { 'authorization': `Bearer ${apiKey}` } : {},
-          body: {
-            model,
-            messages,
-            temperature: 0.7,
-          }
-        })
-      });
+    let retryCount = 0;
+    const maxRetries = 3;
+    let success = false;
+    let finalActions: LLMAction[] = [];
+    let finalRawResponse = '';
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`Status ${response.status}: ${errText}`);
-      }
+    while (retryCount <= maxRetries && !success) {
+      try {
+        if (retryCount > 0) {
+          isRegeneratingRef.current = true;
+          pushLine({ type: 'output', text: `Correction cycle ${retryCount}/${maxRetries}: Duplicate ticket detected. Requesting unique ticket regeneration...` });
+        }
 
-      const data = await response.json();
-      const rawResponse = data.choices?.[0]?.message?.content || '';
-
-      if (!rawResponse) {
-        throw new Error('Empty response from LLM');
-      }
-
-      const parsedActions = parseLLMResponse(rawResponse);
-
-      setState(prev => {
-        let updatedTickets = [...prev.tickets];
-        let updatedDevelopers = [...prev.developers];
-        let updatedCandidates = [...prev.candidates];
-        let updatedCash = prev.finances.cash;
-        const newTerminalLines: TerminalLine[] = [];
-
-        parsedActions.forEach(action => {
-          switch (action.type) {
-            case 'add_ticket': {
-              const payload = action.payload;
-              const exists = updatedTickets.some(t => t.title.toLowerCase().trim() === payload.title.toLowerCase().trim());
-              if (exists) {
-                break;
-              }
-              const newTicket = {
-                ...payload,
-                id: `t-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-                status: 'backlog' as const,
-                assignedTo: null,
-                progressPoints: 0,
-              };
-              updatedTickets.push(newTicket);
-              newTerminalLines.push({
-                type: 'event',
-                text: `Day ${prev.currentDay} — New ticket: "${newTicket.title}" (${newTicket.storyPoints} SP)`,
-                timestamp: Date.now()
-              });
-              break;
+        const response = await fetch('/api/proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            endpoint,
+            headers: apiKey ? { 'authorization': `Bearer ${apiKey}` } : {},
+            body: {
+              model,
+              messages: currentMessages,
+              temperature: 0.7,
             }
-            case 'add_bug_ticket': {
-              const payload = action.payload;
-              const exists = updatedTickets.some(t => t.title.toLowerCase().trim() === payload.title.toLowerCase().trim());
-              if (exists) {
-                break;
-              }
-              const newBug = {
-                ...payload,
-                id: `t-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-                status: 'todo' as const,
-                assignedTo: null,
-                progressPoints: 0,
-              };
-              updatedTickets.push(newBug);
-              newTerminalLines.push({
-                type: 'event',
-                text: `Day ${prev.currentDay} — BUG reporting: "${newBug.title}" (Penalty: -$${newBug.revenuePenalty}/mo)`,
-                timestamp: Date.now()
-              });
-              break;
-            }
-            case 'dev_applied': {
-              updatedCandidates.push(action.payload);
-              newTerminalLines.push({
-                type: 'event',
-                text: `Day ${prev.currentDay} — Candidate applied: ${action.payload.name} (${action.payload.role}, ${action.payload.level})`,
-                timestamp: Date.now()
-              });
-              break;
-            }
-            case 'dev_quit': {
-              const devId = action.payload.developerId;
-              const dev = updatedDevelopers.find(d => d.id === devId);
-              if (dev) {
-                updatedDevelopers = updatedDevelopers.filter(d => d.id !== devId);
-                if (dev.currentTicketId) {
-                  updatedTickets = updatedTickets.map(t => 
-                    t.id === dev.currentTicketId 
-                      ? { ...t, status: 'todo' as const, assignedTo: null } 
-                      : t
-                  );
-                }
-                newTerminalLines.push({
-                  type: 'event',
-                  text: `Day ${prev.currentDay} — Dev resigned: ${dev.name} (${action.payload.reason})`,
-                  timestamp: Date.now()
-                });
-              }
-              break;
-            }
-            case 'market_event': {
-              const { headline, revenueEffect, cashEffect, permanent } = action.payload;
-              if (permanent) {
-                const virtualTicket = {
-                  id: `t-market-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-                  title: headline,
-                  description: 'Market event effect',
-                  type: 'feature' as const,
-                  severity: 'medium' as const,
-                  storyPoints: 0,
-                  revenueIncrease: revenueEffect,
-                  revenuePenalty: 0,
-                  status: 'done' as const,
-                  assignedTo: null,
-                  progressPoints: 0,
-                };
-                updatedTickets.push(virtualTicket);
-              }
-              updatedCash += cashEffect;
-              newTerminalLines.push({
-                type: 'event',
-                text: `Day ${prev.currentDay} — Market: ${headline} (${cashEffect !== 0 ? `Cash: ${cashEffect >= 0 ? '+' : ''}$${cashEffect.toLocaleString()}` : ''}${revenueEffect !== 0 ? `, MRR: ${revenueEffect >= 0 ? '+' : ''}$${revenueEffect.toLocaleString()}/mo` : ''})`,
-                timestamp: Date.now()
-              });
-              break;
-            }
-          }
+          })
         });
 
-        const nextTurnIndex = prev.loopHistory.length + 1;
-        const turn: LoopTurn = {
-          turnIndex: nextTurnIndex,
-          rawResponse,
-          parsedActions,
-          timestamp: Date.now(),
-        };
+        if (!response.ok) {
+          const errText = await response.text();
+          throw new Error(`Status ${response.status}: ${errText}`);
+        }
 
-        const activePenalties = updatedTickets
-          .filter(t => t.type === 'bug' && t.status !== 'done')
-          .reduce((sum, t) => sum + t.revenuePenalty, 0);
+        const data = await response.json();
+        const rawResponse = data.choices?.[0]?.message?.content || '';
+        if (!rawResponse) {
+          throw new Error('Empty response');
+        }
 
-        const monthlyRevenue = updatedTickets
-          .filter(t => t.status === 'done')
-          .reduce((sum, t) => sum + t.revenueIncrease, 0);
-          
-        const monthlyBurnRate = updatedDevelopers.reduce((sum, d) => sum + d.salary, 0);
-        const runway = updatedCash / Math.max(monthlyBurnRate - monthlyRevenue + activePenalties, 1);
+        const parsedActions = parseLLMResponse(rawResponse);
+        
+        // Check for duplicates
+        let hasDuplicate = false;
+        let duplicateTitle = '';
+        const openAndDoneTickets = stateRef.current.tickets;
 
-        return {
-          ...prev,
-          tickets: updatedTickets,
-          developers: updatedDevelopers,
-          candidates: updatedCandidates,
-          loopHistory: [...prev.loopHistory, turn],
-          finances: {
-            cash: updatedCash,
-            monthlyBurnRate,
-            monthlyRevenue,
-            activePenalties,
-            runway,
-          },
-          terminalHistory: [...prev.terminalHistory, ...newTerminalLines],
-        };
-      });
-    } catch (error: any) {
-      console.error('LLM Loop Error:', error);
-      pushLine({ type: 'error', text: `LLM Loop Error: ${error.message}` });
-    } finally {
-      isLLMLoopRunningRef.current = false;
+        for (const action of parsedActions) {
+          if (action.type === 'add_ticket' || action.type === 'add_bug_ticket') {
+            const title = action.payload.title.toLowerCase().trim();
+            const exists = openAndDoneTickets.some(t => t.title.toLowerCase().trim() === title);
+            if (exists) {
+              hasDuplicate = true;
+              duplicateTitle = action.payload.title;
+              break;
+            }
+          }
+        }
+
+        if (hasDuplicate) {
+          retryCount++;
+          if (retryCount > maxRetries) {
+            break;
+          }
+          currentMessages = [
+            ...currentMessages,
+            { role: 'assistant', content: rawResponse },
+            { 
+              role: 'user', 
+              content: `[ERROR] The ticket "${duplicateTitle}" already exists on the backlog or has been completed. Please review the ticket titles and generate a fresh ticket with a completely unique title. Do NOT repeat or suggest existing tickets.` 
+            }
+          ];
+        } else {
+          success = true;
+          finalActions = parsedActions;
+          finalRawResponse = rawResponse;
+        }
+
+      } catch (error: any) {
+        pushLine({ type: 'error', text: `Advisor connection error: ${error.message}` });
+        break;
+      }
     }
+
+    isLLMLoopRunningRef.current = false;
+    isRegeneratingRef.current = false;
+
+    if (!success) {
+      if (retryCount > maxRetries) {
+        pushLine({ type: 'error', text: 'Error: Board Advisor repeatedly proposed duplicate tickets. Skipped turn.' });
+      }
+      return;
+    }
+
+    setState(prev => {
+      let updatedTickets = [...prev.tickets];
+      let updatedDevelopers = [...prev.developers];
+      let updatedCandidates = [...prev.candidates];
+      let updatedCash = prev.finances.cash;
+      const newTerminalLines: TerminalLine[] = [];
+
+      finalActions.forEach(action => {
+        switch (action.type) {
+          case 'add_ticket': {
+            const newTicket = {
+              ...action.payload,
+              id: `t-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              status: 'backlog' as const,
+              assignedTo: null,
+              progressPoints: 0,
+            };
+            updatedTickets.push(newTicket);
+            newTerminalLines.push({
+              type: 'event',
+              text: `Day ${prev.currentDay} — New ticket: "${newTicket.title}" (${newTicket.storyPoints} SP)`,
+              timestamp: Date.now()
+            });
+            break;
+          }
+          case 'add_bug_ticket': {
+            const newBug = {
+              ...action.payload,
+              id: `t-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+              status: 'todo' as const,
+              assignedTo: null,
+              progressPoints: 0,
+            };
+            updatedTickets.push(newBug);
+            newTerminalLines.push({
+              type: 'event',
+              text: `Day ${prev.currentDay} — BUG reporting: "${newBug.title}" (Penalty: -$${newBug.revenuePenalty}/mo)`,
+              timestamp: Date.now()
+            });
+            break;
+          }
+          case 'dev_applied': {
+            updatedCandidates.push(action.payload);
+            newTerminalLines.push({
+              type: 'event',
+              text: `Day ${prev.currentDay} — Candidate applied: ${action.payload.name} (${action.payload.role}, ${action.payload.level})`,
+              timestamp: Date.now()
+            });
+            break;
+          }
+          case 'dev_quit': {
+            const devId = action.payload.developerId;
+            const dev = updatedDevelopers.find(d => d.id === devId);
+            if (dev) {
+              updatedDevelopers = updatedDevelopers.filter(d => d.id !== devId);
+              if (dev.currentTicketId) {
+                updatedTickets = updatedTickets.map(t => 
+                  t.id === dev.currentTicketId 
+                    ? { ...t, status: 'todo' as const, assignedTo: null } 
+                    : t
+                );
+              }
+              newTerminalLines.push({
+                type: 'event',
+                text: `Day ${prev.currentDay} — Dev resigned: ${dev.name} (${action.payload.reason})`,
+                timestamp: Date.now()
+              });
+            }
+            break;
+          }
+          case 'market_event': {
+            const { headline, revenueEffect, cashEffect, permanent } = action.payload;
+            if (permanent) {
+              const virtualTicket = {
+                id: `t-market-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+                title: headline,
+                description: 'Market event effect',
+                type: 'feature' as const,
+                severity: 'medium' as const,
+                storyPoints: 0,
+                revenueIncrease: revenueEffect,
+                revenuePenalty: 0,
+                status: 'done' as const,
+                assignedTo: null,
+                progressPoints: 0,
+              };
+              updatedTickets.push(virtualTicket);
+            }
+            updatedCash += cashEffect;
+            newTerminalLines.push({
+              type: 'event',
+              text: `Day ${prev.currentDay} — Market: ${headline} (${cashEffect !== 0 ? `Cash: ${cashEffect >= 0 ? '+' : ''}$${cashEffect.toLocaleString()}` : ''}${revenueEffect !== 0 ? `, MRR: ${revenueEffect >= 0 ? '+' : ''}$${revenueEffect.toLocaleString()}/mo` : ''})`,
+              timestamp: Date.now()
+            });
+            break;
+          }
+        }
+      });
+
+      const nextTurnIndex = prev.loopHistory.length + 1;
+      const turn: LoopTurn = {
+        turnIndex: nextTurnIndex,
+        rawResponse: finalRawResponse,
+        parsedActions: finalActions,
+        timestamp: Date.now(),
+      };
+
+      const activePenalties = updatedTickets
+        .filter(t => t.type === 'bug' && t.status !== 'done')
+        .reduce((sum, t) => sum + t.revenuePenalty, 0);
+
+      const monthlyRevenue = updatedTickets
+        .filter(t => t.status === 'done')
+        .reduce((sum, t) => sum + t.revenueIncrease, 0);
+        
+      const monthlyBurnRate = updatedDevelopers.reduce((sum, d) => sum + d.salary, 0);
+      const runway = updatedCash / Math.max(monthlyBurnRate - monthlyRevenue + activePenalties, 1);
+
+      return {
+        ...prev,
+        tickets: updatedTickets,
+        developers: updatedDevelopers,
+        candidates: updatedCandidates,
+        loopHistory: [...prev.loopHistory, turn],
+        finances: {
+          cash: updatedCash,
+          monthlyBurnRate,
+          monthlyRevenue,
+          activePenalties,
+          runway,
+        },
+        terminalHistory: [...prev.terminalHistory, ...newTerminalLines],
+      };
+    });
   }, [pushLine]);
 
   useEffect(() => {
