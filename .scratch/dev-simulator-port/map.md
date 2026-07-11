@@ -17,8 +17,7 @@ Port the dev simulator game from scratch into a Next.js web application. The gam
 - [Tool Calling Parser](issues/03-tool-calling-parser.md) — Implemented a robust XML-like parser at `src/lib/parser.ts` to convert LLM output tags (`add_ticket`, `add_bug_ticket`, `dev_applied`, `dev_quit`, `market_event`) into type-safe game action events. Supports double, single, and unquoted attributes, automatically handles type conversions, provides fallback values, and auto-generates candidate IDs.
 - [Slash Command Engine](issues/05-slash-command-engine.md) — Implemented terminal slash command router in `src/app/page.tsx`. Parses inputs (`/backlog`, `/hire`, `/pause`, `/resume`, `/settings`, `/help`) to toggle overlays, modify game simulation statuses, or display/update detailed LLM proxy configuration properties with inline validations.
 - [Dashboard Layout Prototype](issues/04-dashboard-layout-prototype.md) — Approved layout: Header → MetricCards → TeamPanel+RecentEvents → Terminal (20vh fixed). JetBrains Mono, dot-grid bg, role color badges, glow cards. `/hire` and `/backlog` slash commands wired. Prototype running at localhost:3000.
-
-
+- [Simulation Loop](issues/06-simulation-loop.md) — Implemented day-ticking clock advancing developer ticket progress to completion, pay and MRR collection monthly logic with a game-over handler on bankruptcy, and an asynchronous periodic LLM proxy consultation loop injecting new tickets, applicants, resignations, and market events parsed via XML tag tool calling.
 
 
 ## Not yet specified
