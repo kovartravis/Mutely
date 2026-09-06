@@ -1,82 +1,62 @@
-import { GameStatus } from '@/lib/types';
+import { RunState, stageAt, STAGES } from '@/sim';
 
-interface HeaderProps {
-  companyName: string;
-  currentDay: number;
-  gameStatus: GameStatus;
-}
+const money = (n: number) => `$${Math.round(n).toLocaleString()}`;
 
-const statusColor: Record<GameStatus, string> = {
-  running:   '#00ff88',
-  paused:    '#ffaa00',
-  game_over: '#ff4466',
-};
+export default function Header({ state }: { state: RunState }) {
+  const stage = stageAt(state.stageIndex);
+  const progress = Math.max(0, Math.min(1, state.mrr / stage.goalMrr));
 
-const statusLabel: Record<GameStatus, string> = {
-  running:   '● RUNNING',
-  paused:    '⏸ PAUSED',
-  game_over: '✕ GAME OVER',
-};
+  const statusLabel =
+    state.status === 'won' ? 'COMPLETE'
+    : state.status === 'lost' ? 'INSOLVENT'
+    : state.speed === 0 ? 'PAUSED'
+    : `RUNNING ${state.speed}x`;
 
-export default function Header({ companyName, currentDay, gameStatus }: HeaderProps) {
-  const color = statusColor[gameStatus];
+  const statusClass =
+    state.status === 'lost' ? 'bloom-bug'
+    : state.status === 'won' ? 'bloom-ok'
+    : state.speed === 0 ? 'bloom-warn'
+    : 'dim';
 
   return (
     <header
-      className="app-header"
       style={{
-        background: '#0d0f14',
-        borderBottom: '1px solid #1e2433',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        height: '44px',
-        flexShrink: 0,
-        position: 'relative',
-        zIndex: 10,
+        display: 'flex', alignItems: 'center', gap: 16,
+        padding: '0 12px', height: 38, flexShrink: 0,
+        borderBottom: '1px solid var(--rule)', background: 'var(--bg-panel)',
       }}
     >
-      {/* Company Name */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <span style={{ color: '#00d4ff', fontSize: 16, fontWeight: 700, letterSpacing: '0.05em' }}>
-          ⬡
-        </span>
-        <span style={{ color: '#e2e8f0', fontWeight: 600, fontSize: 14, letterSpacing: '0.08em' }}>
-          {companyName.toUpperCase()}
-        </span>
+      <span style={{ letterSpacing: '0.16em', fontWeight: 600 }}>{state.companyName}</span>
+
+      {/* Stage ladder -- the campaign is always visible, never behind a command. */}
+      <div style={{ display: 'flex', gap: 10 }} className="faint">
+        {STAGES.map((s, i) => (
+          <span
+            key={s.key}
+            className={i === state.stageIndex ? 'bloom-ok' : undefined}
+            style={{ opacity: i < state.stageIndex ? 0.45 : 1, letterSpacing: '0.1em', fontSize: 10 }}
+          >
+            {i < state.stageIndex ? '✓' : i === state.stageIndex ? '▶' : '·'} {s.name}
+          </span>
+        ))}
       </div>
 
-      {/* Day Counter */}
-      <div
-        style={{
-          background: '#1a1f2e',
-          border: '1px solid #2d3748',
-          borderRadius: 6,
-          padding: '3px 14px',
-          color: '#e2e8f0',
-          fontSize: 13,
-          fontWeight: 500,
-          letterSpacing: '0.1em',
-        }}
-      >
-        DAY&nbsp;&nbsp;<span style={{ color: '#00d4ff', fontWeight: 700 }}>{currentDay}</span>
+      <div style={{ flex: 1, minWidth: 60 }}>
+        <div style={{ height: 3, background: 'var(--rule)', position: 'relative' }}>
+          <div style={{ position: 'absolute', inset: 0, width: `${progress * 100}%`, background: 'var(--feat)' }} />
+        </div>
+        <div className="faint nums" style={{ fontSize: 10, marginTop: 2 }}>
+          {money(state.mrr)} / {money(stage.goalMrr)} MRR
+        </div>
       </div>
 
-      {/* Status Pill */}
-      <div
-        style={{
-          background: `${color}14`,
-          border: `1px solid ${color}60`,
-          borderRadius: 20,
-          padding: '3px 14px',
-          color: color,
-          fontSize: 12,
-          fontWeight: 600,
-          letterSpacing: '0.1em',
-        }}
-      >
-        {statusLabel[gameStatus]}
-      </div>
+      {/* A mode that keeps acting must be visible, or the player loses track of
+          why people keep getting assigned. */}
+      {state.autoAssign && (
+        <span className="bloom-ok" style={{ letterSpacing: '0.1em', fontSize: 11 }}>AUTO</span>
+      )}
+      <span className="nums dim">DAY {state.day}</span>
+      <span className={statusClass} style={{ letterSpacing: '0.1em', fontSize: 11 }}>{statusLabel}</span>
     </header>
   );
 }
