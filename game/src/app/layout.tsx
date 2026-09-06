@@ -1,23 +1,25 @@
 import type { Metadata } from 'next';
+import { JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 
+// Self-hosted by next/font, so there is no render-blocking request to Google and
+// no layout shift on first paint.
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ['latin'],
+  weight: ['300', '400', '500', '600'],
+  variable: '--font-jetbrains',
+  display: 'swap',
+});
+
 export const metadata: Metadata = {
-  title: 'Dev Simulator',
-  description: 'A startup management simulation game',
+  title: 'Mutely',
+  description: 'Run a software company from a terminal.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <head>
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap"
-          rel="stylesheet"
-        />
-      </head>
-      <body style={{ position: 'relative', zIndex: 1 }}>{children}</body>
+    <html lang="en" className={jetbrainsMono.variable}>
+      <body>{children}</body>
     </html>
   );
 }

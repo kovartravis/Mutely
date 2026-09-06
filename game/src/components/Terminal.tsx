@@ -1,193 +1,220 @@
 'use client';
 
-import { useRef, useState, useEffect, KeyboardEvent } from 'react';
-import { TerminalLine } from '@/lib/types';
+import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ARCHITECTURES, COMMANDS, EventLevel, GameEvent, isOpen, RunState, topDiscipline } from '@/sim';
 
 interface TerminalProps {
-  history: TerminalLine[];
-  onCommand: (cmd: string) => void;
+  state: RunState;
+  saveNames: string[];
+  onCommand: (input: string) => void;
 }
 
-const COMMANDS = ['/hire', '/backlog', '/pause', '/resume', '/settings', '/help'];
-
-const lineColor: Record<TerminalLine['type'], string> = {
-  input:  '#718096',
-  output: '#00ff88',
-  error:  '#ff4466',
-  event:  '#00d4ff',
+/** Routine levels stay quiet; only alarm states are allowed to bloom. */
+const LEVEL_CLASS: Record<EventLevel, string> = {
+  command: 'faint',
+  reply: '',
+  info: 'dim',
+  good: 'bloom-ok',
+  warn: 'bloom-warn',
+  alarm: 'bloom-bug',
 };
 
-export default function Terminal({ history, onCommand }: TerminalProps) {
+interface Completion {
+  value: string;
+  hint: string;
+}
+
+/**
+ * Completions come from live game objects rather than a static list -- pressing
+ * TAB is how the player discovers what exists (ADR-0002).
+ */
+function completionsFor(state: RunState, saves: string[], input: string): Completion[] {
+  const endsWithSpace = /\s$/.test(input);
+  const tokens = input.trim().split(/\s+/).filter(Boolean);
+  const argIndex = endsWithSpace ? tokens.length - 1 : tokens.length - 2;
+  const partial = endsWithSpace ? '' : (tokens[tokens.length - 1] ?? '');
+
+  // Completing the command itself.
+  if (tokens.length === 0 || (argIndex < 0 && !endsWithSpace)) {
+    return COMMANDS.filter((c) => c.name.startsWith(partial.toLowerCase()))
+      .map((c) => ({ value: c.name, hint: c.summary }));
+  }
+
+  const spec = COMMANDS.find((c) => c.name === tokens[0].toLowerCase());
+  const kind = spec?.args[argIndex];
+  if (!kind) return [];
+
+  const strip = partial.replace(/^[@#]/, '').toLowerCase();
+  const match = (s: string) => s.toLowerCase().startsWith(strip);
+
+  switch (kind) {
+    case 'dev':
+      return state.developers.filter((d) => match(d.handle)).map((d) => ({
+        value: `@${d.handle}`,
+        hint: `${d.level} · ${topDiscipline(d.proficiency)} ${Math.round(d.proficiency[topDiscipline(d.proficiency)])} · morale ${Math.round(d.morale)}${d.noticeDaysLeft !== null ? ' · NOTICE' : ''}`,
+      }));
+    case 'candidate':
+      return state.candidates.filter((c) => match(c.handle)).map((c) => ({
+        value: `@${c.handle}`,
+        hint: `${c.level} · $${c.salary.toLocaleString()}/mo · ${c.expiresDay - state.day}d left`,
+      }));
+    case 'ticket':
+      return state.tickets.filter((t) => isOpen(t) && match(t.handle)).map((t) => ({
+        value: `#${t.handle}`,
+        hint: `${t.type.toUpperCase()} · ${t.severity} · ${t.discipline} · ${t.storyPoints}sp · ${t.title}`,
+      }));
+    case 'automode':
+      return [
+        { value: 'off', hint: 'stop auto-assigning' },
+        { value: 'once', hint: 'assign now, do not stay on' },
+      ].filter((c) => match(c.value));
+    case 'speed':
+      return ['0', '1', '2', '4'].filter(match).map((v) => ({
+        value: v,
+        hint: v === '0' ? 'paused' : `${v}x`,
+      }));
+    case 'save':
+      return saves.filter(match).map((n) => ({ value: n, hint: 'save slot' }));
+    case 'architecture':
+      return ARCHITECTURES.filter((a) => a !== state.infra.architecture && match(a)).map((a) => ({
+        value: a, hint: a === state.infra.migratingTo ? 'migration already in progress' : 'migrate here',
+      }));
+    case 'infratarget':
+      return ['compute', 'db'].filter(match).map((v) => ({
+        value: v, hint: v === 'compute' ? `${state.infra.compute} now` : `${state.infra.dbReplicas} replicas now`,
+      }));
+    case 'confirm':
+      return ['confirm'].filter(match).map((v) => ({ value: v, hint: 'commit to this migration' }));
+    default:
+      return [];
+  }
+}
+
+export default function Terminal({ state, saveNames, onCommand }: TerminalProps) {
   const [input, setInput] = useState('');
-  const [histIdx, setHistIdx] = useState(-1);
-  const [cmdHistory, setCmdHistory] = useState<string[]>([]);
-  const [suggestion, setSuggestion] = useState('');
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIdx, setHistoryIdx] = useState(-1);
+  const [active, setActive] = useState(0);
+  const [showCompletions, setShowCompletions] = useState(false);
+
   const inputRef = useRef<HTMLInputElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+
+  const completions = useMemo(
+    () => (showCompletions ? completionsFor(state, saveNames, input).slice(0, 12) : []),
+    [showCompletions, state, saveNames, input],
+  );
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [history]);
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [state.events]);
 
-  useEffect(() => {
-    // Tab autocomplete suggestion
-    if (input.startsWith('/')) {
-      const match = COMMANDS.find(c => c.startsWith(input) && c !== input);
-      setSuggestion(match ? match.slice(input.length) : '');
-    } else {
-      setSuggestion('');
-    }
-  }, [input]);
+  const accept = (completion: Completion) => {
+    const endsWithSpace = /\s$/.test(input);
+    const tokens = input.split(/\s+/).filter(Boolean);
+    if (!endsWithSpace && tokens.length > 0) tokens.pop();
+    const next = [...tokens, completion.value].join(' ');
+    setInput(`${next} `);
+    setShowCompletions(false);
+    inputRef.current?.focus();
+  };
 
-  const handleKey = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      const cmd = input.trim();
-      if (!cmd) return;
-      onCommand(cmd);
-      setCmdHistory(prev => [cmd, ...prev]);
-      setInput('');
-      setHistIdx(-1);
-    } else if (e.key === 'Tab') {
+  const submit = () => {
+    const cmd = input.trim();
+    if (!cmd) return;
+    onCommand(cmd);
+    setHistory((h) => [cmd, ...h].slice(0, 60));
+    setHistoryIdx(-1);
+    setInput('');
+    setShowCompletions(false);
+  };
+
+  const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Tab') {
       e.preventDefault();
-      if (suggestion) setInput(input + suggestion);
-    } else if (e.key === 'ArrowUp') {
+      if (!showCompletions) { setShowCompletions(true); return; }
+      if (completions[active]) accept(completions[active]);
+      return;
+    }
+
+    if (e.key === 'Escape') { setShowCompletions(false); return; }
+
+    if (showCompletions && completions.length > 0) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); setActive((i) => (i + 1) % completions.length); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => (i - 1 + completions.length) % completions.length); return; }
+      if (e.key === 'Enter') { e.preventDefault(); accept(completions[active]); return; }
+    }
+
+    if (e.key === 'Enter') { e.preventDefault(); submit(); return; }
+
+    if (e.key === 'ArrowUp') {
       e.preventDefault();
-      const next = Math.min(histIdx + 1, cmdHistory.length - 1);
-      setHistIdx(next);
-      setInput(cmdHistory[next] ?? '');
-    } else if (e.key === 'ArrowDown') {
+      const idx = Math.min(historyIdx + 1, history.length - 1);
+      if (idx >= 0) { setHistoryIdx(idx); setInput(history[idx]); }
+      return;
+    }
+    if (e.key === 'ArrowDown') {
       e.preventDefault();
-      const next = Math.max(histIdx - 1, -1);
-      setHistIdx(next);
-      setInput(next === -1 ? '' : cmdHistory[next]);
-    } else if (e.key === 'Escape') {
-      setInput('');
-      setSuggestion('');
+      const idx = historyIdx - 1;
+      setHistoryIdx(idx);
+      setInput(idx >= 0 ? history[idx] : '');
     }
   };
 
   return (
-    <div
-      id="terminal-panel"
-      style={{
-        background: '#080a0e',
-        borderTop: '1px solid #1e2433',
-        height: '20vh',
-        minHeight: 120,
-        display: 'flex',
-        flexDirection: 'column',
-        flexShrink: 0,
-        position: 'relative',
-        zIndex: 10,
-      }}
-      onClick={() => inputRef.current?.focus()}
-    >
-      {/* Terminal Header */}
-      <div
-        style={{
-          display: 'flex', alignItems: 'center', padding: '5px 16px',
-          borderBottom: '1px solid #11141a', gap: 8,
-        }}
-      >
-        <div style={{ display: 'flex', gap: 5 }}>
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#ff4466' }} />
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#ffaa00' }} />
-          <div style={{ width: 8, height: 8, borderRadius: '50%', background: '#00ff88' }} />
-        </div>
-        <span style={{ color: '#2d3748', fontSize: 10, letterSpacing: '0.1em', marginLeft: 4 }}>TERMINAL</span>
+    <div className="panel" style={{ height: '31vh', minHeight: 190, margin: '0 8px 8px', flexShrink: 0 }}>
+      <div className="panel-title">
+        <span>TERMINAL</span>
+        <span className="faint">TAB completes · ↑↓ history</span>
       </div>
 
-      {/* Output History */}
-      <div
-        ref={scrollRef}
-        style={{
-          flex: 1, overflowY: 'auto', padding: '8px 16px',
-          display: 'flex', flexDirection: 'column', gap: 3,
-        }}
-      >
-        {history.slice(-30).map((line, i) => (
-          <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-            {line.type === 'input' && (
-              <span style={{ color: '#2d3748', flexShrink: 0 }}>›</span>
-            )}
-            <span
-              style={{
-                color: lineColor[line.type],
-                fontSize: 12,
-                lineHeight: 1.5,
-                opacity: line.type === 'input' ? 0.6 : 1,
-              }}
-            >
-              {line.text}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      {/* Input Row */}
-      <div
-        style={{
-          padding: '6px 16px 8px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          borderTop: '1px solid #11141a',
-          position: 'relative',
-        }}
-      >
-        <span style={{ color: '#00ff88', fontSize: 13, flexShrink: 0 }}>›</span>
-        <div style={{ flex: 1, position: 'relative' }}>
-          <input
-            id="terminal-input"
-            ref={inputRef}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKey}
-            autoComplete="off"
-            spellCheck={false}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              outline: 'none',
-              color: '#e2e8f0',
-              fontSize: 13,
-              fontFamily: 'inherit',
-              width: '100%',
-              caretColor: '#00ff88',
-            }}
-            placeholder=""
-          />
-          {/* Ghost suggestion overlay */}
-          {suggestion && (
-            <span
-              style={{
-                position: 'absolute',
-                left: `${input.length}ch`,
-                top: 0,
-                color: '#2d3748',
-                fontSize: 13,
-                fontFamily: 'inherit',
-                pointerEvents: 'none',
-                lineHeight: '1.4',
-              }}
-            >
-              {suggestion}
-            </span>
-          )}
-        </div>
-
-        {/* Hint */}
-        <div
-          className="terminal-hints"
-          style={{ display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0 }}
-        >
-          {COMMANDS.map(cmd => (
-            <span key={cmd} style={{ color: '#2d3748', fontSize: 10, letterSpacing: '0.05em' }}>
-              {cmd}
-            </span>
+      <div ref={logRef} className="panel-body" onClick={() => inputRef.current?.focus()}>
+        <div className="rows">
+          {state.events.map((event: GameEvent) => (
+            <div key={event.id} className={LEVEL_CLASS[event.level]} style={{ whiteSpace: 'pre-wrap' }}>
+              {event.level === 'command' ? (
+                <span>&gt; {event.text}</span>
+              ) : (
+                <>
+                  <span className="faint">{String(event.day).padStart(4)} </span>
+                  {event.text}
+                </>
+              )}
+            </div>
           ))}
+        </div>
+      </div>
+
+      <div style={{ position: 'relative', borderTop: '1px solid var(--rule)' }}>
+        {showCompletions && completions.length > 0 && (
+          <div className="completions">
+            {completions.map((c, i) => (
+              <div
+                key={c.value + i}
+                className="completion"
+                data-active={i === active}
+                onMouseDown={(e) => { e.preventDefault(); accept(c); }}
+              >
+                <span style={{ minWidth: 88 }}>{c.value}</span>
+                <span className="faint" style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.hint}</span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 10px' }}>
+          <span className="faint">&gt;</span>
+          <input
+            ref={inputRef}
+            className="term-input"
+            value={input}
+            spellCheck={false}
+            autoComplete="off"
+            autoFocus
+            onChange={(e) => { setInput(e.target.value); setActive(0); }}
+            onKeyDown={onKeyDown}
+          />
+          <span className="caret" style={{ color: 'var(--ok)' }}>█</span>
         </div>
       </div>
     </div>

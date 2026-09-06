@@ -151,10 +151,13 @@ export async function POST(req: NextRequest) {
       statusText: response.statusText,
       headers: responseHeaders,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Proxy Error:', error);
     return NextResponse.json(
-      { error: 'Internal server error in LLM proxy', details: error.message },
+      {
+        error: 'Internal server error in LLM proxy',
+        details: error instanceof Error ? error.message : String(error),
+      },
       { status: 500 }
     );
   }
