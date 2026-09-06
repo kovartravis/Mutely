@@ -151,3 +151,35 @@ replica serve more Traffic; a junior-heavy team needs to buy more of it.
 **Over Capacity**:
 When Traffic exceeds Capacity. Raises Churn the same way an open Bug does -- infrastructure is a
 fourth force attacking revenue, alongside Bugs, Tech Debt, and salaries.
+
+### Backlog pressure
+
+**Escalation**:
+What happens to an open Bug or Tech Debt Ticket left too long: its Severity ratchets up one step
+per aging threshold, capped at critical. Further aging past critical keeps compounding as an
+Escalation Level, so an old critical Ticket is worse than a freshly-critical one.
+_Avoid_: decay, aging (too vague -- Escalation is specifically the severity ratchet)
+
+**Withdrawal**:
+What happens to an open Feature left too long: it is removed from the backlog entirely rather than
+escalating. A lost opportunity, not a growing liability -- the market moved on.
+
+### Architecture (extended)
+
+**Sub-architecture**:
+A second choice nested under the main Architecture -- a Database engine and a Compute runtime,
+each with its own explicit trade-off (a size delta applied to every rolled Ticket, and a Capacity
+multiplier). Which Sub-architectures are available depends on the main Architecture. Switching one
+reuses the Migration mechanism, scaled down.
+
+**Cache**:
+An optional layer that serves a share of Traffic before it reaches Compute or the Database,
+reducing required Capacity by its hit rate. Decays if not refreshed, and a badly stale Cache can
+spawn a Bug of its own -- an upkeep loop, not a one-time purchase.
+
+### People (extended)
+
+**Promotable**:
+A Developer whose Proficiency in their top Discipline has crossed the threshold for their next
+Level. Derived, not stored -- like Discipline itself. `/promote` commits it: base Velocity rises a
+tier, salary scales with it, and Morale gets a real boost.

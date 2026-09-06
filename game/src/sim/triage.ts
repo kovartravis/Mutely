@@ -6,7 +6,10 @@
  * harness reports would stop describing the game the player is actually handed.
  */
 
-import { churnRate, effectiveVelocity, isOpen, velocityMultiplier } from './economy';
+import {
+  churnRate, debtInflation, debtInflationWeight, effectiveSeverity, effectiveVelocity,
+  infraCost, isOpen, velocityMultiplier,
+} from './economy';
 import { SIM, stageAt } from './tuning';
 import { Developer, RunState, Ticket } from './types';
 
@@ -28,32 +31,50 @@ export interface Assignment {
  *   a debt fix raises drag  -> worth mrr * (drag' / drag - 1)
  *
  * Pricing bugs at a flat mrr*dc -- the obvious mistake -- undervalues them ~6x.
+ * Independent of any particular Developer, so it also ranks the backlog itself
+ * (`/board`'s default view) without inventing a hypothetical assignee.
  */
-export function valuePerDay(state: RunState, dev: Developer, ticket: Ticket): number {
-  const dragNow = velocityMultiplier(state);
-  const velocity = effectiveVelocity(dev, ticket, dragNow);
-  if (velocity <= 0.01) return 0;
-  const days = (ticket.storyPoints - ticket.progressPoints) / velocity;
-
+export function ticketValue(state: RunState, ticket: Ticket, dragNow: number): number {
+  const severity = effectiveSeverity(ticket);
   let value: number;
   if (ticket.type === 'feature') {
     value = ticket.revenue;
   } else if (ticket.type === 'bug') {
-    const dc = stageAt(state.stageIndex).baseChurn * SIM.bugChurnWeight[ticket.severity];
+    const dc = stageAt(state.stageIndex).baseChurn * SIM.bugChurnWeight[severity];
     value = (state.mrr * dc) / Math.max(churnRate(state), 1e-6);
   } else {
-    const w = SIM.debtDragWeight[ticket.severity];
+    // Tech Debt attacks two Pressures at once (ADR-0004): fixing it relieves
+    // Drag on Velocity, AND removes its share of the Capacity inflation that
+    // drives up the infra bill. Pricing only the first term is exactly why an
+    // old, ignored debt ticket used to look worthless right up until its
+    // uncapped infra cost quietly bankrupted the company -- see ADR-0004
+    // and the balance notes for 2026-09-06.
+    const w = SIM.debtDragWeight[severity];
     const totalW = 1 / dragNow - 1;
     const improved = 1 / (1 + Math.max(0, totalW - w));
-    value = state.mrr * (improved / dragNow - 1);
+    const dragValue = state.mrr * (improved / dragNow - 1);
+
+    const totalInflationWeight = debtInflation(state) - 1;
+    const thisWeight = debtInflationWeight(ticket);
+    const fractionOfInflation = totalInflationWeight > 0 ? thisWeight / totalInflationWeight : 0;
+    const infraValue = infraCost(state) * fractionOfInflation;
+
+    value = dragValue + infraValue;
   }
 
   // Early on there is no MRR, so bug and debt work prices at zero and features
   // win by default. Floor non-feature work at its size so the board still gets
   // triaged sensibly before revenue exists.
   if (value <= 0 && ticket.type !== 'feature') value = ticket.storyPoints;
+  return value;
+}
 
-  return value / Math.max(days, 0.5);
+export function valuePerDay(state: RunState, dev: Developer, ticket: Ticket): number {
+  const dragNow = velocityMultiplier(state);
+  const velocity = effectiveVelocity(dev, ticket, dragNow);
+  if (velocity <= 0.01) return 0;
+  const days = (ticket.storyPoints - ticket.progressPoints) / velocity;
+  return ticketValue(state, ticket, dragNow) / Math.max(days, 0.5);
 }
 
 /**

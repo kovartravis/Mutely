@@ -6,23 +6,27 @@
  */
 
 import {
-  computeCost, computeEfficiency, daysRemaining, dbCost, dbEfficiency, debtInflation,
-  effectiveCapacity, effectiveVelocity, finances, infraCost, isOpen, utilization, velocityMultiplier,
+  cacheCost, computeCost, computeEfficiency, daysRemaining, dbCost, dbEfficiency, debtInflation,
+  effectiveCapacity, effectiveSeverity, effectiveVelocity, finances, infraCost, isOpen,
+  utilization, velocityMultiplier,
 } from './economy';
 import { resolveCandidate, resolveDeveloper, resolveTicket } from './handles';
-import { hireCandidate, topDiscipline } from './roll';
-import { idleDevelopers, planAssignments } from './triage';
-import { SIM, stageAt, STAGES } from './tuning';
+import { hireCandidate, isPromotable, nextLevel, topDiscipline } from './roll';
+import { idleDevelopers, planAssignments, ticketValue } from './triage';
+import { DB_ENGINE_SPECS, INFRA, RUNTIME_SPECS, SIM, stageAt, STAGES } from './tuning';
 import { pushEvent } from './tick';
-import { ARCHITECTURES, Architecture, Developer, DISCIPLINES, RunState, Ticket } from './types';
-import { INFRA } from './tuning';
+import {
+  ARCHITECTURES, Architecture, DB_ENGINES, DbEngine, Developer, DISCIPLINES, PendingChange,
+  RunState, RUNTIMES, Runtime, Ticket,
+} from './types';
 
 export type Effect =
   | { kind: 'save'; name: string }
   | { kind: 'load'; name: string }
   | { kind: 'list_saves' }
   | { kind: 'delete_save'; name: string }
-  | { kind: 'restart' };
+  | { kind: 'restart' }
+  | { kind: 'toggle_overlay'; overlay: 'architecture' };
 
 export interface CommandResult {
   state: RunState;
@@ -34,14 +38,15 @@ export interface CommandSpec {
   /** Argument shapes, used to drive tab-completion. */
   args: Array<
     'dev' | 'candidate' | 'ticket' | 'number' | 'text' | 'speed' | 'save' | 'automode'
-    | 'architecture' | 'infratarget' | 'confirm'
+    | 'architecture' | 'infratarget' | 'confirm' | 'boardfilter' | 'switchaxis'
+    | 'dbengine' | 'runtime' | 'cacheaction'
   >;
   summary: string;
 }
 
 export const COMMANDS: CommandSpec[] = [
   { name: '/help',     args: [],                    summary: 'list commands' },
-  { name: '/board',    args: [],                    summary: 'open tickets, newest first' },
+  { name: '/board',    args: ['boardfilter'],       summary: 'urgent tickets; all|bug|feature|debt|stale to filter' },
   { name: '/team',     args: [],                    summary: 'the team, proficiency and morale' },
   { name: '/status',   args: [],                    summary: 'stage progress and the four pressures' },
   { name: '/ticket',   args: ['ticket'],            summary: 'detail on one ticket' },
@@ -51,6 +56,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: '/auto',     args: ['automode'],          summary: 'keep idle developers assigned (off | once)' },
   { name: '/hire',     args: ['candidate'],         summary: 'candidates, or hire one' },
   { name: '/fire',     args: ['dev'],               summary: 'let a developer go (1 month severance)' },
+  { name: '/promote',  args: ['dev'],               summary: 'promote a developer once eligible' },
   { name: '/raise',    args: ['dev', 'number'],     summary: 'permanent monthly raise, lifts morale' },
   { name: '/bonus',    args: ['dev', 'number'],     summary: 'one-off cash bonus, lifts morale' },
   { name: '/speed',    args: ['speed'],             summary: 'set clock speed: 0 1 2 4' },
@@ -59,9 +65,12 @@ export const COMMANDS: CommandSpec[] = [
   { name: '/save',     args: ['text'],              summary: 'save this run under a name' },
   { name: '/load',     args: ['save'],              summary: 'load a saved run' },
   { name: '/saves',    args: [],                    summary: 'list save slots' },
-  { name: '/infra',    args: [],                    summary: 'architecture, capacity, and infra cost' },
-  { name: '/scale',    args: ['infratarget', 'number'], summary: 'add or remove compute or db capacity' },
-  { name: '/migrate',  args: ['architecture', 'confirm'], summary: 'switch architecture (costly, takes days)' },
+  { name: '/infra',       args: [],                          summary: 'architecture, capacity, and infra cost' },
+  { name: '/architecture', args: [],                         summary: 'open the full architecture diagram' },
+  { name: '/scale',       args: ['infratarget', 'number'],   summary: 'add or remove compute or db capacity' },
+  { name: '/migrate',     args: ['architecture', 'confirm'], summary: 'switch architecture (costly, takes days)' },
+  { name: '/switch',      args: ['switchaxis', 'dbengine', 'confirm'], summary: 'switch database engine or runtime' },
+  { name: '/cache',       args: ['cacheaction'],             summary: 'buy, upgrade, or refresh the cache' },
   { name: '/seed',     args: [],                    summary: 'show this run seed' },
   { name: '/restart',  args: [],                    summary: 'abandon this run and start over' },
 ];
@@ -80,11 +89,33 @@ function bar(fraction: number, width = 10): string {
 
 const TYPE_LABEL = { feature: 'FEAT', bug: 'BUG ', tech_debt: 'DEBT' } as const;
 
+function computeLabel(architecture: Architecture): string {
+  return architecture === 'monolith' ? 'tier' : architecture === 'kubernetes' ? 'node' : 'concurrency unit';
+}
+
+function describePending(pending: PendingChange): string {
+  const noun = pending.kind === 'architecture' ? 'migrating to' : pending.kind === 'db' ? 'switching database to' : 'switching runtime to';
+  return `${noun} ${pending.target} (${pending.daysLeft}d left)`;
+}
+
+function pendingLabel(pending: PendingChange | null): string {
+  return pending ? `  -> ${describePending(pending)}` : '';
+}
+
+/** Tickets stop showing up in the bare /board's "hidden" count past this age. */
+const STALE_AFTER_DAYS = 30;
+/** Bare /board caps at this many rows before pointing at the filters. */
+const BOARD_URGENT_SIZE = 14;
+
 function ticketLine(state: RunState, t: Ticket): string {
   const dev = t.assignedTo ? state.developers.find((d) => d.id === t.assignedTo) : null;
   const who = dev ? `@${dev.handle}` : '--';
   const progress = t.progressPoints > 0 ? bar(t.progressPoints / t.storyPoints, 6) : '      ';
-  return `  #${pad(t.handle, 4)} ${TYPE_LABEL[t.type]} ${pad(t.severity, 9)}${pad(t.discipline, 9)}${padL(String(t.storyPoints), 3)}sp ${progress} ${pad(who, 9)}${t.title}`;
+  const severity = effectiveSeverity(t);
+  const esc = t.escalationLevel > 0 ? ` ^${t.escalationLevel}` : '';
+  const expiry = t.type === 'feature' && t.expiresDay !== null
+    ? `  exp ${Math.max(0, t.expiresDay - state.day)}d` : '';
+  return `  #${pad(t.handle, 4)} ${TYPE_LABEL[t.type]} ${pad(severity, 8)}${esc.padEnd(3)}${pad(t.discipline, 9)}${padL(String(t.storyPoints), 3)}sp ${progress} ${pad(who, 9)}${t.title}${expiry}`;
 }
 
 function devLine(state: RunState, d: Developer): string {
@@ -92,7 +123,8 @@ function devLine(state: RunState, d: Developer): string {
   const top = topDiscipline(d.proficiency);
   const working = ticket ? `#${ticket.handle}` : '--';
   const notice = d.noticeDaysLeft !== null ? `  NOTICE ${d.noticeDaysLeft}d` : '';
-  return `  @${pad(d.handle, 10)}${pad(d.level, 7)}${pad(top, 9)}${padL(String(Math.round(d.proficiency[top])), 3)}  morale ${padL(String(Math.round(d.morale)), 3)}  ${padL(money(d.salary), 8)}/mo  ${pad(working, 5)}${notice}`;
+  const promo = notice === '' && isPromotable(d) ? '  ▲ promotable' : '';
+  return `  @${pad(d.handle, 10)}${pad(d.level, 7)}${pad(top, 9)}${padL(String(Math.round(d.proficiency[top])), 3)}  morale ${padL(String(Math.round(d.morale)), 3)}  ${padL(money(d.salary), 8)}/mo  ${pad(working, 5)}${notice}${promo}`;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -104,7 +136,11 @@ function clone(state: RunState): RunState {
     candidates: state.candidates.map((c) => ({ ...c })),
     tickets: state.tickets.map((t) => ({ ...t })),
     events: state.events.slice(),
-    infra: { ...state.infra },
+    infra: {
+      ...state.infra,
+      cache: { ...state.infra.cache },
+      pending: state.infra.pending ? { ...state.infra.pending } : null,
+    },
   };
 }
 
@@ -154,10 +190,50 @@ export function apply(input: RunState, raw: string): CommandResult {
     }
 
     case '/board': {
-      const open = state.tickets.filter(isOpen).sort((a, b) => b.createdDay - a.createdDay);
+      const filter = (args[0] ?? '').toLowerCase();
+      const open = state.tickets.filter(isOpen);
       if (open.length === 0) { reply(state, 'Backlog is empty.'); return { state }; }
-      reply(state, `BACKLOG  ${open.length} open`);
-      for (const t of open) reply(state, ticketLine(state, t));
+
+      const dragNow = velocityMultiplier(state);
+      const byValue = (a: Ticket, b: Ticket) => ticketValue(state, b, dragNow) - ticketValue(state, a, dragNow);
+      const isStale = (t: Ticket) => state.day - t.createdDay >= STALE_AFTER_DAYS;
+      const isUrgent = (t: Ticket) =>
+        t.escalationLevel > 0 || (t.type === 'feature' && t.expiresDay !== null && t.expiresDay - state.day <= 10);
+
+      if (filter === 'all') {
+        const sorted = [...open].sort(byValue);
+        reply(state, `BACKLOG  ${sorted.length} open, by value`);
+        for (const t of sorted) reply(state, ticketLine(state, t));
+        return { state };
+      }
+      if (filter === 'bug' || filter === 'feature' || filter === 'debt') {
+        const type = filter === 'debt' ? 'tech_debt' : filter;
+        const filtered = open.filter((t) => t.type === type).sort(byValue);
+        reply(state, `${filter.toUpperCase()}  ${filtered.length} open`);
+        for (const t of filtered) reply(state, ticketLine(state, t));
+        return { state };
+      }
+      if (filter === 'stale') {
+        const stale = open.filter(isStale).sort((a, b) => a.createdDay - b.createdDay);
+        if (stale.length === 0) { reply(state, `No ticket has been open ${STALE_AFTER_DAYS}+ days.`); return { state }; }
+        reply(state, `STALE  ${stale.length} ticket${stale.length === 1 ? '' : 's'} open ${STALE_AFTER_DAYS}+ days`);
+        for (const t of stale) reply(state, ticketLine(state, t));
+        return { state };
+      }
+      if (filter) {
+        fail(state, `Usage: /board [all|bug|feature|debt|stale]`);
+        return { state };
+      }
+
+      // Bare /board: what actually needs a decision, not the whole pile.
+      const urgent = open.filter(isUrgent).sort(byValue);
+      const filler = open.filter((t) => !isUrgent(t)).sort(byValue).slice(0, Math.max(0, BOARD_URGENT_SIZE - urgent.length));
+      const shown = [...urgent, ...filler];
+      const hidden = open.length - shown.length;
+
+      reply(state, `BACKLOG  ${shown.length} of ${open.length} open shown${hidden > 0 ? `, ${hidden} hidden` : ''}`);
+      for (const t of shown) reply(state, ticketLine(state, t));
+      if (hidden > 0) reply(state, `/board all -- see everything  ·  /board bug|feature|debt|stale -- filter`);
       return { state };
     }
 
@@ -189,21 +265,25 @@ export function apply(input: RunState, raw: string): CommandResult {
       const debt = debtInflation(state);
       const cCost = computeCost(infra);
       const dCost = dbCost(infra);
-      const label =
-        infra.architecture === 'monolith' ? 'tier'
-        : infra.architecture === 'kubernetes' ? 'node'
-        : 'concurrency unit';
+      const cache = infra.cache;
+      const label = computeLabel(infra.architecture);
 
-      reply(state, `ARCHITECTURE  ${infra.architecture.toUpperCase()}${infra.migratingTo ? `  -> migrating to ${infra.migratingTo.toUpperCase()} (${infra.migrationDaysLeft}d left)` : ''}`);
+      reply(state, `ARCHITECTURE  ${infra.architecture.toUpperCase()}${pendingLabel(infra.pending)}`);
       reply(state, `  traffic     ${Math.round(infra.traffic).toLocaleString()} req/day`);
       reply(state, `  capacity    ${Math.round(effectiveCapacity(state)).toLocaleString()} req/day  (${(u * 100).toFixed(0)}% utilized)${u > 1 ? '  OVER CAPACITY -- churn rising' : ''}`);
       if (debt > 1) reply(state, `  debt load   x${debt.toFixed(2)}  (open tech debt inflates required capacity)`);
-      reply(state, `  compute     ${infra.compute} ${label}${infra.compute === 1 ? '' : 's'}  ·  ${money(cCost)}/mo  ·  efficiency ${computeEfficiency(state).toFixed(2)}x (devops)`);
-      reply(state, `  database    ${infra.dbReplicas} replica${infra.dbReplicas === 1 ? '' : 's'}  ·  ${money(dCost)}/mo  ·  efficiency ${dbEfficiency(state).toFixed(2)}x (dba)`);
-      reply(state, `  total       ${money(cCost + dCost)}/mo`);
-      reply(state, 'Commands: /scale compute|db <+/-N>, /migrate <monolith|kubernetes|serverless>');
+      reply(state, `  compute     ${infra.compute} ${label}${infra.compute === 1 ? '' : 's'}  ·  ${RUNTIME_SPECS[infra.runtime].label}  ·  ${money(cCost)}/mo  ·  efficiency ${computeEfficiency(state).toFixed(2)}x (devops)`);
+      reply(state, `  database    ${infra.dbReplicas} replica${infra.dbReplicas === 1 ? '' : 's'}  ·  ${DB_ENGINE_SPECS[infra.dbEngine].label}  ·  ${money(dCost)}/mo  ·  efficiency ${dbEfficiency(state).toFixed(2)}x (dba)`);
+      if (cache.active) {
+        reply(state, `  cache       tier ${cache.tier}  ·  ${(cache.hitRate * 100).toFixed(0)}% hit rate  ·  ${money(cacheCost(infra))}/mo  ·  refreshed ${state.day - cache.lastRefreshedDay}d ago`);
+      }
+      reply(state, `  total       ${money(cCost + dCost + cacheCost(infra))}/mo`);
+      reply(state, '/architecture for the full diagram  ·  /scale, /switch, /cache, /migrate to act');
       return { state };
     }
+
+    case '/architecture':
+      return { state, effect: { kind: 'toggle_overlay', overlay: 'architecture' } };
 
     case '/scale': {
       const target = (args[0] ?? '').toLowerCase();
@@ -239,8 +319,8 @@ export function apply(input: RunState, raw: string): CommandResult {
         fail(state, `Usage: /migrate <${ARCHITECTURES.join('|')}>`);
         return { state };
       }
-      if (state.infra.migratingTo !== null) {
-        fail(state, `Already migrating to ${state.infra.migratingTo}. Wait for it to finish.`);
+      if (state.infra.pending !== null) {
+        fail(state, `Already ${describePending(state.infra.pending)}. Wait for it to finish.`);
         return { state };
       }
       if (to === state.infra.architecture) {
@@ -265,11 +345,132 @@ export function apply(input: RunState, raw: string): CommandResult {
       }
 
       state.cash -= cost;
-      state.infra.migratingTo = to;
       // Commands are deterministic (no Rng reaches here) so the duration is
       // fixed at the midpoint of the Tuning Table's range, rather than rolled.
-      state.infra.migrationDaysLeft = Math.round((INFRA.migration.days[0] + INFRA.migration.days[1]) / 2);
-      pushEvent(state, 'alarm', `Migration to ${to} started. ${money(cost)} charged. ${state.infra.migrationDaysLeft} days at reduced velocity.`);
+      const days = Math.round((INFRA.migration.days[0] + INFRA.migration.days[1]) / 2);
+      state.infra.pending = { kind: 'architecture', target: to, daysLeft: days };
+      pushEvent(state, 'alarm', `Migration to ${to} started. ${money(cost)} charged. ${days} days at reduced velocity.`);
+      return { state };
+    }
+
+    case '/switch': {
+      const axis = (args[0] ?? '').toLowerCase();
+      if (axis !== 'db' && axis !== 'runtime') {
+        fail(state, 'Usage: /switch db|runtime <target>');
+        return { state };
+      }
+      const target = (args[1] ?? '').toLowerCase();
+      const infra = state.infra;
+
+      if (infra.pending !== null) {
+        fail(state, `Already ${describePending(infra.pending)}. Wait for it to finish.`);
+        return { state };
+      }
+
+      if (axis === 'db') {
+        if (!DB_ENGINES.includes(target as DbEngine)) {
+          fail(state, `Usage: /switch db <${DB_ENGINES.join('|')}>`);
+          return { state };
+        }
+        const engine = target as DbEngine;
+        const spec = DB_ENGINE_SPECS[engine];
+        if (!spec.availableOn.includes(infra.architecture)) {
+          fail(state, `${spec.label} isn't available on ${infra.architecture}. Available: ${spec.availableOn.join(', ')}.`);
+          return { state };
+        }
+        if (engine === infra.dbEngine) { fail(state, `Already running ${spec.label}.`); return { state }; }
+
+        const cost = INFRA.subSwitch.costBase + infraCost(state) * INFRA.subSwitch.costMonthsOfInfra;
+        const confirmed = (args[2] ?? '').toLowerCase() === 'confirm';
+        if (!confirmed) {
+          reply(state, `SWITCH ${DB_ENGINE_SPECS[infra.dbEngine].label.toUpperCase()} -> ${spec.label.toUpperCase()}`);
+          reply(state, `  ${spec.description}`);
+          reply(state, `  sp delta ${spec.spDelta >= 0 ? '+' : ''}${spec.spDelta}  ·  capacity x${spec.capacityMultiplier}  ·  cost x${spec.costMultiplier}`);
+          reply(state, `  cost ${money(cost)}  ·  ${INFRA.subSwitch.days[0]}-${INFRA.subSwitch.days[1]} days at ${(INFRA.subSwitch.velocityPenalty * 100).toFixed(0)}% velocity`);
+          reply(state, `  confirm with /switch db ${target} confirm`);
+          return { state };
+        }
+        if (state.cash < cost) { fail(state, `Need ${money(cost)}; you have ${money(state.cash)}.`); return { state }; }
+        state.cash -= cost;
+        const days = Math.round((INFRA.subSwitch.days[0] + INFRA.subSwitch.days[1]) / 2);
+        infra.pending = { kind: 'db', target: engine, daysLeft: days };
+        pushEvent(state, 'alarm', `Switching database to ${spec.label}. ${money(cost)} charged. ${days} days at reduced velocity.`);
+        return { state };
+      }
+
+      if (!RUNTIMES.includes(target as Runtime)) {
+        fail(state, `Usage: /switch runtime <${RUNTIMES.join('|')}>`);
+        return { state };
+      }
+      const runtime = target as Runtime;
+      const spec = RUNTIME_SPECS[runtime];
+      if (runtime === infra.runtime) { fail(state, `Already running ${spec.label}.`); return { state }; }
+
+      const cost = INFRA.subSwitch.costBase + infraCost(state) * INFRA.subSwitch.costMonthsOfInfra;
+      const confirmed = (args[2] ?? '').toLowerCase() === 'confirm';
+      if (!confirmed) {
+        reply(state, `SWITCH ${RUNTIME_SPECS[infra.runtime].label.toUpperCase()} -> ${spec.label.toUpperCase()}`);
+        reply(state, `  ${spec.description}`);
+        reply(state, `  sp delta ${spec.spDelta >= 0 ? '+' : ''}${spec.spDelta}  ·  capacity x${spec.capacityMultiplier}  ·  cost x${spec.costMultiplier}`);
+        reply(state, `  cost ${money(cost)}  ·  ${INFRA.subSwitch.days[0]}-${INFRA.subSwitch.days[1]} days at ${(INFRA.subSwitch.velocityPenalty * 100).toFixed(0)}% velocity`);
+        reply(state, `  confirm with /switch runtime ${target} confirm`);
+        return { state };
+      }
+      if (state.cash < cost) { fail(state, `Need ${money(cost)}; you have ${money(state.cash)}.`); return { state }; }
+      state.cash -= cost;
+      const days = Math.round((INFRA.subSwitch.days[0] + INFRA.subSwitch.days[1]) / 2);
+      infra.pending = { kind: 'compute', target: runtime, daysLeft: days };
+      pushEvent(state, 'alarm', `Switching runtime to ${spec.label}. ${money(cost)} charged. ${days} days at reduced velocity.`);
+      return { state };
+    }
+
+    case '/cache': {
+      const action = (args[0] ?? '').toLowerCase();
+      const cache = state.infra.cache;
+      const tiers = INFRA.cache.tiers;
+
+      if (action === 'buy' || action === 'upgrade') {
+        const nextTier = cache.tier + 1;
+        if (nextTier >= tiers.length) { fail(state, 'Already at the top cache tier.'); return { state }; }
+        if (!cache.active && action === 'upgrade') { fail(state, 'No cache yet -- /cache buy first.'); return { state }; }
+        const cost = tiers[nextTier].monthlyCost;
+        cache.active = true;
+        cache.tier = nextTier;
+        cache.lastRefreshedDay = state.day;
+        pushEvent(state, 'good', `Cache ${action === 'buy' ? 'purchased' : 'upgraded'} -- tier ${nextTier}, up to ${(tiers[nextTier].maxHitRate * 100).toFixed(0)}% hit rate, ${money(cost)}/mo.`);
+        return { state };
+      }
+      if (action === 'refresh') {
+        if (!cache.active) { fail(state, 'No cache to refresh. /cache buy first.'); return { state }; }
+        cache.lastRefreshedDay = state.day;
+        reply(state, `Cache refreshed. Hit rate will hold, then warm back toward ${(tiers[cache.tier].maxHitRate * 100).toFixed(0)}%.`);
+        return { state };
+      }
+      reply(state, `CACHE  ${cache.active ? `tier ${cache.tier}, ${(cache.hitRate * 100).toFixed(0)}% hit rate` : 'not active'}`);
+      reply(state, 'Usage: /cache buy | upgrade | refresh');
+      return { state };
+    }
+
+    case '/promote': {
+      const dev = resolveDeveloper(state, args[0] ?? '');
+      if (!dev) { fail(state, `No developer "${args[0] ?? ''}".`); return { state }; }
+
+      const next = nextLevel(dev.level);
+      if (!next) { fail(state, `@${dev.handle} is already staff -- nothing higher to promote to.`); return { state }; }
+
+      if (!isPromotable(dev)) {
+        const top = topDiscipline(dev.proficiency);
+        fail(state, `@${dev.handle} isn't ready -- ${top} proficiency ${Math.round(dev.proficiency[top])}, needs ${SIM.promotionThreshold[dev.level]}.`);
+        return { state };
+      }
+
+      const ratio = SIM.baseSalary[next] / SIM.baseSalary[dev.level];
+      const oldSalary = dev.salary;
+      const oldLevel = dev.level;
+      dev.level = next;
+      dev.salary = Math.round((dev.salary * ratio) / 100) * 100;
+      dev.morale = Math.min(100, dev.morale + SIM.promotionMoraleBoost);
+      pushEvent(state, 'good', `@${dev.handle} promoted ${oldLevel} -> ${next}. Salary ${money(oldSalary)} -> ${money(dev.salary)}/mo.`);
       return { state };
     }
 

@@ -10,6 +10,7 @@ import {
   computeCost, computeEfficiency, dbCapacity, dbEfficiency, finances,
   isOpen, rawComputeCapacity, requiredCapacity,
 } from './economy';
+import { isPromotable } from './roll';
 import { INFRA, SIM, stageAt } from './tuning';
 import { RunState } from './types';
 
@@ -33,7 +34,14 @@ export function ensureAutoAssign(state: RunState): RunState {
 function infraCommands(state: RunState): string[] {
   const commands: string[] = [];
   const infra = state.infra;
-  if (infra.migratingTo !== null) return commands; // one thing at a time
+  if (infra.pending !== null) return commands; // one thing at a time
+
+  // Every disruptive infra decision below (migrating Architecture, switching
+  // Runtime, buying a Cache) is gated on being past the single-founder phase.
+  // Each costs cash and days of reduced velocity -- a fine trade once there is
+  // a team and revenue to protect, a self-inflicted wound when the founder
+  // alone is still trying to reach the first hire.
+  const established = state.developers.length >= 2 || stageAt(state.stageIndex).key !== 'garage';
 
   const need = requiredCapacity(state);
 
@@ -59,7 +67,7 @@ function infraCommands(state: RunState): string[] {
     if (target < infra.dbReplicas) commands.push(`/scale db -${infra.dbReplicas - target}`);
   }
 
-  if (infra.architecture === 'monolith') {
+  if (established && infra.architecture === 'monolith') {
     // The monolith's cost is superlinear; kubernetes wins once its overhead is
     // paid back. Compare what each would cost to serve today's traffic.
     const monolithCost = computeCost(infra);
@@ -71,12 +79,42 @@ function infraCommands(state: RunState): string[] {
     }
   }
 
+  // Runtime is the one Sub-architecture axis this reference player touches --
+  // Go's capacity multiplier pays for its +1sp cost once compute is genuinely
+  // the bottleneck. It leaves the Database engine at the Postgres default
+  // (already a strong general choice) and never tries Managed, mirroring how
+  // it never tries serverless: good enough without becoming the skill ceiling.
+  if (established && infra.runtime === 'node' && Math.max(uCompute, 0) > 0.7 && state.cash > computeCost(infra) * 15) {
+    commands.push('/switch runtime go');
+    commands.push('/switch runtime go confirm');
+  }
+
+  // A Cache pays for itself once compute or database utilization runs hot --
+  // buy it, then upgrade as the ceiling stops being enough, and refresh before
+  // it goes stale enough to risk an integrity bug.
+  const hot = Math.max(uCompute, uDb) > 0.7;
+  const tiers = INFRA.cache.tiers;
+  if (established && !infra.cache.active && hot && state.cash > tiers[1].monthlyCost * 15) {
+    commands.push('/cache buy');
+  } else if (established && infra.cache.active && hot && infra.cache.tier < tiers.length - 1 && state.cash > tiers[infra.cache.tier + 1].monthlyCost * 15) {
+    commands.push('/cache upgrade');
+  }
+  if (infra.cache.active && state.day - infra.cache.lastRefreshedDay > INFRA.cache.staleAfterDays - 5) {
+    commands.push('/cache refresh');
+  }
+
   return commands;
 }
 
 export function decide(state: RunState): string[] {
   const commands: string[] = [...infraCommands(state)];
   const f = finances(state);
+
+  // 0. A Proficiency-eligible Developer is promoted immediately -- the raised
+  //    base Velocity is worth its proportional salary bump almost every time.
+  for (const dev of state.developers) {
+    if (isPromotable(dev)) commands.push(`/promote @${dev.handle}`);
+  }
 
   // 1. Defend Morale before it becomes Notice. A one-off bonus is preferred to a
   //    raise: a raise is permanent burn, and burn is what actually kills runs.
@@ -121,13 +159,20 @@ export function decide(state: RunState): string[] {
   const hiredRecently = state.developers.some((d) => state.day - d.joinedDay < RECENT_HIRE_DAYS);
   const chasingGoal = state.mrr < stageAt(state.stageIndex).goalMrr * 1.1;
   const worthGrowing = chasingGoal || open.length > state.developers.length * 1.5;
+  // A team of one is a single point of failure for the whole company -- the
+  // second hire is worth taking on much thinner justification than the tenth,
+  // both in reality and here: without it, a solo founder can never clear a
+  // growing backlog, and unaddressed Tech Debt compounding into ever-more-
+  // expensive required Capacity is a death spiral no amount of infra
+  // management alone can fix.
+  const runwayBar = state.developers.length <= 1 ? 6 : 15;
   if (worthGrowing && !hiredRecently && state.candidates.length > 0) {
     const affordable = state.candidates
       .filter((c) => {
         const fee = c.salary * SIM.hiringFeeMonths;
         const newBurn = f.burn + c.salary;
         const newRunway = f.cash - fee > 0 ? (f.cash - fee) / Math.max(newBurn - state.mrr, 1) : 0;
-        return f.cash > fee * 3 && newRunway > 15;
+        return f.cash > fee * 3 && newRunway > runwayBar;
       })
       .sort((a, b) => {
         const va = SIM.baseVelocity[a.level] / a.salary;

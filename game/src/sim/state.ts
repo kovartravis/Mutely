@@ -6,11 +6,10 @@
 import { emptyQueue } from './flavor';
 import { createRng } from './rng';
 import { rollFounder, rollTicket } from './roll';
-import { STAGES } from './tuning';
-import { INFRA } from './tuning';
+import { INFRA, STAGES } from './tuning';
 import { RunState } from './types';
 
-export const RUN_VERSION = 4;
+export const RUN_VERSION = 5;
 
 export function newRun(companyName = 'NEBULASTACK', seed = Math.floor(Math.random() * 0xffffffff)): RunState {
   const state: RunState = {
@@ -24,12 +23,14 @@ export function newRun(companyName = 'NEBULASTACK', seed = Math.floor(Math.rando
     autoAssign: false,
     infra: {
       architecture: 'monolith',
+      dbEngine: 'postgres',
+      runtime: 'node',
       compute: 1,
       dbReplicas: 1,
       traffic: INFRA.trafficStart,
       trafficBaseline: INFRA.trafficStart,
-      migratingTo: null,
-      migrationDaysLeft: null,
+      cache: { active: false, tier: 0, hitRate: 0, lastRefreshedDay: 1 },
+      pending: null,
     },
     cash: STAGES[0].fundingCash,
     mrr: 0,
@@ -89,6 +90,28 @@ function migrate(parsed: { version: number } & Record<string, unknown>): RunStat
         migrationDaysLeft: null,
       },
     };
+  }
+  if (state.version === 4) {
+    const oldInfra = state.infra as Record<string, unknown>;
+    state = {
+      ...state,
+      version: 5,
+      infra: {
+        ...oldInfra,
+        dbEngine: 'postgres',
+        runtime: 'node',
+        cache: { active: false, tier: 0, hitRate: 0, lastRefreshedDay: (state as { day?: number }).day ?? 1 },
+        pending: null,
+      },
+      tickets: ((state.tickets as unknown[]) ?? []).map((t) => ({
+        ...(t as Record<string, unknown>),
+        escalationLevel: 0,
+        expiresDay: null,
+      })),
+    };
+    // The old migratingTo/migrationDaysLeft pair no longer exists on Infra.
+    delete (state.infra as Record<string, unknown>).migratingTo;
+    delete (state.infra as Record<string, unknown>).migrationDaysLeft;
   }
 
   return state.version === RUN_VERSION ? (state as unknown as RunState) : null;

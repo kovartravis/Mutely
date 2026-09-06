@@ -7,7 +7,7 @@
 import { popPersonFlavor, popTicketFlavor } from './flavor';
 import { developerHandle, nextTicketHandle } from './handles';
 import { Rng } from './rng';
-import { disciplineWeights, salaryFor, SIM, stageAt } from './tuning';
+import { DB_ENGINE_SPECS, disciplineWeights, RUNTIME_SPECS, salaryFor, SIM, stageAt } from './tuning';
 import {
   Candidate, Developer, Discipline, DISCIPLINES, Level, LEVELS,
   ProficiencyMap, RunState, Severity, Ticket, TicketType,
@@ -30,12 +30,19 @@ export function rollTicket(state: RunState, rng: Rng, type: TicketType): Ticket 
   const discipline = rollDiscipline(rng);
 
   const [minP, maxP] = stage.points;
-  const storyPoints = Math.max(1, Math.round(rng.int(minP, maxP) * SIM.severitySize[severity]));
+  // The chosen Sub-architectures add friction (or shave it off) on every
+  // Ticket, not just infra-flavored ones -- Postgres discipline or a compiled
+  // Runtime slows the whole team down a little, always.
+  const subDelta = DB_ENGINE_SPECS[state.infra.dbEngine].spDelta + RUNTIME_SPECS[state.infra.runtime].spDelta;
+  const storyPoints = Math.max(1, Math.round(rng.int(minP, maxP) * SIM.severitySize[severity]) + subDelta);
 
   const revenue =
     type === 'feature'
       ? Math.round((storyPoints * rng.float(...stage.revenuePerPoint)) / 10) * 10
       : 0;
+
+  const expiresDay =
+    type === 'feature' ? state.day + rng.int(...SIM.featureExpiryDays[severity]) : null;
 
   const { title, description } = popTicketFlavor(state.flavor, rng, type, discipline);
 
@@ -54,6 +61,8 @@ export function rollTicket(state: RunState, rng: Rng, type: TicketType): Ticket 
     assignedTo: null,
     createdDay: state.day,
     completedDay: null,
+    escalationLevel: 0,
+    expiresDay,
   };
 }
 
@@ -131,4 +140,17 @@ export function topDiscipline(p: ProficiencyMap): Discipline {
 
 export function levelLabel(level: Level): string {
   return LEVELS.includes(level) ? level : 'mid';
+}
+
+/** The Level one tier up, or null once already staff. */
+export function nextLevel(level: Level): Level | null {
+  const idx = LEVELS.indexOf(level);
+  return idx >= 0 && idx < LEVELS.length - 1 ? LEVELS[idx + 1] : null;
+}
+
+/** Promotable is derived from Proficiency, not stored (CONTEXT.md: Promotable). */
+export function isPromotable(dev: Developer): boolean {
+  if (nextLevel(dev.level) === null) return false;
+  const top = topDiscipline(dev.proficiency);
+  return dev.proficiency[top] >= SIM.promotionThreshold[dev.level];
 }

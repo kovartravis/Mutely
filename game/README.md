@@ -32,23 +32,46 @@ inflates infra needs at once -- the death spiral is reachable by design.
 
 ## Infrastructure
 
-Traffic grows on its own schedule, independent of MRR, and occasionally spikes. The company runs
-on one of three Architectures -- monolith, kubernetes, or serverless -- each with its own capacity
-and cost formula (`src/sim/economy.ts`: `rawComputeCapacity`, `computeCost`). Efficiency comes from
-team Proficiency already tracked for ticket-matching: average `devops` Proficiency for compute,
-`dba` for the database -- so senior hires pay off continuously, not just when an infra-flavored
-ticket happens to be open.
+Traffic grows on its own schedule, independent of MRR, and occasionally spikes (a spike bumps one
+Day only -- the underlying trend is a separate `trafficBaseline` that never ratchets upward from a
+spike, see the balance notes below). The company runs on one of three Architectures -- monolith,
+kubernetes, or serverless -- each with its own capacity and cost formula. A second axis sits under
+that: a Database engine and a Compute runtime, each with an explicit trade-off (a size delta added
+to every rolled Ticket, a Capacity multiplier) spelled out in full on `/architecture`. Which
+Database engines are available depends on the main Architecture (ADR-0005).
+
+Efficiency comes from team Proficiency already tracked for ticket-matching: average `devops`
+Proficiency for compute, `dba` for the database -- so senior hires pay off continuously, not just
+when an infra-flavored ticket happens to be open.
 
 ```
-/infra                      architecture, traffic vs capacity, cost breakdown
-/scale compute|db <+/-N>    add or remove capacity, changes the recurring bill
-/migrate <architecture>     preview a switch; add "confirm" to commit (costly, takes days)
+/infra                       one-line architecture, capacity, and cost summary
+/architecture                the full diagram -- every axis, every trade-off, spelled out
+/scale compute|db <+/-N>     add or remove capacity, changes the recurring bill
+/migrate <architecture>      preview a switch; add "confirm" to commit (costly, takes days)
+/switch db|runtime <target>  switch a Sub-architecture -- same mechanism, smaller bet
+/cache buy|upgrade|refresh   an optional layer that absorbs Traffic before Compute/DB see it
 ```
 
 Traffic compounds exponentially forever, with no ceiling -- so a run that drags on too long
 eventually goes bankrupt on infra cost alone, regardless of how well tickets are triaged. That's
 deliberate: it's what killed the old timeout outcome (a run neither winning nor losing before the
 day cap) and replaces it with a genuine loss.
+
+## Backlog pressure
+
+Tickets arrive faster than headcount alone can absorb, and the gap widens by Stage
+(`arrivalTeamMultiplier`) -- the backlog is meant to outpace hiring, not track it. An open Bug or
+Tech Debt Ticket left too long ratchets its Severity up (Escalation); an old Feature is withdrawn
+instead (lost opportunity, not a growing liability). `/board` defaults to what's actually urgent
+(escalated or near-expiry) rather than the whole pile; `/board all|bug|feature|debt|stale` filters.
+
+## Promotion
+
+A Developer becomes Promotable once their Proficiency in their top Discipline crosses a threshold
+-- derived, not stored, same as Discipline itself. The Team panel flags it (`▲ promotable`);
+`/promote @dev` commits it, raising their Level (a real Velocity tier, not just cosmetic) and
+scaling salary with it.
 
 ## Balancing
 
@@ -63,17 +86,17 @@ The harness plays hundreds of seeded Runs with a reference player (`src/sim/poli
 for a competent human, and reports how far each Run got:
 
 ```
-MUTELY BALANCE  160 runs, 1400 day cap
+MUTELY BALANCE  300 runs, 1600 day cap
 
-  won         151  50.3%   median day 920
-  bankrupt    149  49.7%   median day 1120
+  won         156  52.0%   median day 1128
+  bankrupt    144  48.0%   median day 1000
   timeout       0   0.0%
 
   STAGE                 reached      cleared
-  GARAGE     ████████████████████  300    298   99%
-  SEED       ████████████████████  298    298  100%
-  SERIES A   ████████████████████  298    264   89%
-  IPO        ██████████████████··  264    151   57%
+  GARAGE     ████████████████████  300    264   88%
+  SEED       ██████████████████··  264    259   98%
+  SERIES A   █████████████████···  259    247   95%
+  IPO        ████████████████····  247    156   63%
 ```
 
 The target is roughly a 50% overall win rate with a rising curve -- Garage as a tutorial, IPO as a
@@ -90,6 +113,27 @@ before MRR exists), then making standing auto-assign reassign a Developer the in
 Ticket -- same tick, not the next day. That second change alone is worth more at a large team, since
 every Developer who is never idle for even one Day compounds hard over an 800+ day run. Re-measure
 after touching `policy.ts`, `triage.ts`, or `tick.ts`'s `doAutoAssign`.
+
+Adding the backlog/architecture depth (2026-09-06) surfaced two real bugs the harness caught, not
+tuning problems:
+
+- **An uncapped `debtInflation`.** Unlike `churnRate` (capped by `maxChurnMultiplier`), an escalating,
+  never-fixed Tech Debt Ticket compounded its Capacity-inflation weight forever -- 25x, then 34x by
+  day 280 in one traced run, forcing ever-larger purchases onto the monolith's superlinear cost
+  curve until a *solo founder* went bankrupt on infra cost alone. Any weight that compounds off an
+  unbounded input (Escalation Level, in this case) needs the same ceiling `churnRate` already has --
+  see `INFRA.maxDebtInflation`.
+- **A pricing blind spot in `triage.ts`.** Fixing Tech Debt was priced only by its Drag relief, never
+  by the infra-cost it was quietly inflating in the background -- so neither `/auto` nor the
+  reference player had any signal to prioritize the ticket that was about to bankrupt them. Fixed
+  by adding an infra-savings term to the debt valuation (see `debtInflationWeight` in `economy.ts`).
+
+Also: a gate meant to keep the reference player from making disruptive infra bets (migrating,
+switching, buying a Cache) *before its second hire* was applied to the Runtime/Cache checks but
+missed the main-Architecture migration check entirely -- a solo founder could still get migrated to
+kubernetes, eating a large cash cost and a 50%-velocity penalty alone. Any new "don't do this while
+still tiny" guard needs to cover every trigger that shares the guard's premise, not just the ones
+added in the same edit.
 
 Because every Roll derives from the Run's Seed, a scenario is reproducible: `/seed` prints it, and
 the same Seed replays the same bugs on the same days.

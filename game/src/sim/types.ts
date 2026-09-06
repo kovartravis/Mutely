@@ -70,6 +70,14 @@ export interface Ticket {
   assignedTo: string | null;
   createdDay: number;
   completedDay: number | null;
+  /**
+   * How many times this Ticket has escalated. Bugs and Tech Debt only. 0..3
+   * ratchets Severity low->medium->high->critical; beyond that it keeps
+   * counting and further inflates Churn/Drag without a Severity label change.
+   */
+  escalationLevel: number;
+  /** Features only: the Day this Ticket is withdrawn if still open. */
+  expiresDay: number | null;
 }
 
 // ─── Events ──────────────────────────────────────────────────────────────────
@@ -111,8 +119,32 @@ export interface FlavorQueue {
 export const ARCHITECTURES = ['monolith', 'kubernetes', 'serverless'] as const;
 export type Architecture = (typeof ARCHITECTURES)[number];
 
+export const DB_ENGINES = ['postgres', 'mongo', 'managed'] as const;
+export type DbEngine = (typeof DB_ENGINES)[number];
+
+export const RUNTIMES = ['node', 'go', 'python'] as const;
+export type Runtime = (typeof RUNTIMES)[number];
+
+/** One in-flight change of any kind (ADR-0005). Only one at a time, across all three axes. */
+export interface PendingChange {
+  kind: 'architecture' | 'db' | 'compute';
+  target: Architecture | DbEngine | Runtime;
+  daysLeft: number;
+}
+
+export interface Cache {
+  active: boolean;
+  /** 1, 2, or 3. Sets the ceiling `hitRate` decays toward when refreshed. */
+  tier: number;
+  /** 0..1 fraction of Traffic served without touching Compute or Database. */
+  hitRate: number;
+  lastRefreshedDay: number;
+}
+
 export interface Infra {
   architecture: Architecture;
+  dbEngine: DbEngine;
+  runtime: Runtime;
   /**
    * The architecture-specific compute dial: server Tier for monolith, Node
    * count for kubernetes, reserved Concurrency (thousands) for serverless.
@@ -129,9 +161,8 @@ export interface Infra {
    * instead of ratcheting the baseline upward forever.
    */
   trafficBaseline: number;
-  /** Architecture being migrated to, or null when not migrating. */
-  migratingTo: Architecture | null;
-  migrationDaysLeft: number | null;
+  cache: Cache;
+  pending: PendingChange | null;
 }
 
 // ─── Run ─────────────────────────────────────────────────────────────────────

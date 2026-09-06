@@ -1,6 +1,6 @@
 import {
-  computeCost, computeEfficiency, dbCost, dbEfficiency, debtInflation,
-  effectiveCapacity, RunState, utilization,
+  cacheCost, computeCost, computeEfficiency, DB_ENGINE_SPECS, dbCost, dbEfficiency, debtInflation,
+  effectiveCapacity, RunState, RUNTIME_SPECS, utilization,
 } from '@/sim';
 import Meter from './Meter';
 
@@ -16,6 +16,7 @@ export default function ArchitecturePanel({ state }: { state: RunState }) {
   const capacity = effectiveCapacity(state);
   const label = RESOURCE_LABEL[infra.architecture];
   const overTone = u > 1 ? 'var(--bug)' : u > 0.85 ? 'var(--warn)' : 'var(--feat)';
+  const cache = infra.cache;
 
   return (
     <div className="panel" style={{ flex: 1 }}>
@@ -25,9 +26,10 @@ export default function ArchitecturePanel({ state }: { state: RunState }) {
       </div>
       <div className="panel-body">
         <div className="rows">
-          {infra.migratingTo && (
+          {infra.pending && (
             <div className="bloom-warn">
-              migrating -&gt; {infra.migratingTo.toUpperCase()} ({infra.migrationDaysLeft}d left, 0.5x velocity)
+              {infra.pending.kind === 'architecture' ? 'migrating' : 'switching'} -&gt; {String(infra.pending.target).toUpperCase()}
+              {' '}({infra.pending.daysLeft}d left)
             </div>
           )}
 
@@ -55,6 +57,7 @@ export default function ArchitecturePanel({ state }: { state: RunState }) {
             <span className="nums">
               {infra.compute} {label}{infra.compute === 1 ? '' : 's'}
             </span>
+            <span className="dim">{RUNTIME_SPECS[infra.runtime].label}</span>
             <span className="dim nums">{money(computeCost(infra))}/mo</span>
             <span className="faint">devops {computeEfficiency(state).toFixed(2)}x</span>
           </div>
@@ -64,9 +67,18 @@ export default function ArchitecturePanel({ state }: { state: RunState }) {
             <span className="nums">
               {infra.dbReplicas} replica{infra.dbReplicas === 1 ? '' : 's'}
             </span>
+            <span className="dim">{DB_ENGINE_SPECS[infra.dbEngine].label}</span>
             <span className="dim nums">{money(dbCost(infra))}/mo</span>
             <span className="faint">dba {dbEfficiency(state).toFixed(2)}x</span>
           </div>
+
+          {cache.active && (
+            <div style={{ display: 'flex', gap: 8, whiteSpace: 'pre' }}>
+              <span className="faint" style={{ minWidth: 70 }}>cache</span>
+              <span className="nums">tier {cache.tier}, {(cache.hitRate * 100).toFixed(0)}% hit</span>
+              <span className="dim nums">{money(cacheCost(infra))}/mo</span>
+            </div>
+          )}
         </div>
       </div>
     </div>

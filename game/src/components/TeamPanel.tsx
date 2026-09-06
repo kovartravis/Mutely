@@ -1,4 +1,4 @@
-import { daysRemaining, RunState, topDiscipline, velocityMultiplier } from '@/sim';
+import { daysRemaining, isPromotable, RunState, topDiscipline, velocityMultiplier } from '@/sim';
 import Meter from './Meter';
 
 const money = (n: number) => `$${Math.round(n).toLocaleString()}`;
@@ -48,6 +48,9 @@ export default function TeamPanel({ state }: { state: RunState }) {
                       </span>
                     ) : (
                       <span className="faint">idle</span>
+                    )}
+                    {dev.noticeDaysLeft === null && isPromotable(dev) && (
+                      <span className="bloom-ok"> · ▲ promotable /promote @{dev.handle}</span>
                     )}
                   </span>
                 </div>

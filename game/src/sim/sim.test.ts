@@ -2,14 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { apply } from './commands';
-import { churnRate, computeEfficiency, drag, effectiveCapacity, finances as economyFinances, isOpen, requiredCapacity } from './economy';
+import { churnRate, computeEfficiency, drag, effectiveCapacity, effectiveSeverity, finances as economyFinances, isOpen, requiredCapacity } from './economy';
 import { popTicketFlavor } from './flavor';
 import { createRng } from './rng';
-import { rollTicket } from './roll';
+import { rollTicket, topDiscipline } from './roll';
 import { deserialise, newRun, serialise } from './state';
 import { run, tick } from './tick';
 import { idleDevelopers, planAssignments } from './triage';
-import { SIM } from './tuning';
+import { INFRA, SIM } from './tuning';
 import { RunState } from './types';
 
 const started = () => apply(newRun('TEST', 4242), '/speed 1').state;
@@ -353,33 +353,121 @@ test('running over capacity raises churn like a bug would', () => {
 test('migration charges cash, cannot double-start, and needs confirmation', () => {
   let state = started();
   const preview = apply(state, '/migrate kubernetes').state;
-  assert.equal(preview.infra.migratingTo, null, 'a bare /migrate must not commit');
+  assert.equal(preview.infra.pending, null, 'a bare /migrate must not commit');
 
   const before = preview.cash;
   state = apply(preview, '/migrate kubernetes confirm').state;
-  assert.equal(state.infra.migratingTo, 'kubernetes');
+  assert.equal(state.infra.pending?.kind, 'architecture');
+  assert.equal(state.infra.pending?.target, 'kubernetes');
   assert.ok(state.cash < before, 'migration must charge cash up front');
 
   const again = apply(state, '/migrate serverless confirm').state;
-  assert.equal(again.infra.migratingTo, 'kubernetes', 'cannot start a second migration mid-flight');
+  assert.equal(again.infra.pending?.target, 'kubernetes', 'cannot start a second migration mid-flight');
 });
 
 test('migration slows the whole team and completes into the new architecture', () => {
   let state = apply(started(), '/migrate kubernetes confirm').state;
-  const days = state.infra.migrationDaysLeft!;
+  const days = state.infra.pending!.daysLeft;
 
   const dev = state.developers[0];
   const ticket = state.tickets.find(isOpen)!;
   state = apply(state, `/assign @${dev.handle} #${ticket.handle}`).state;
 
   const slowProgress = tick(state).tickets.find((t) => t.id === ticket.id)!.progressPoints;
-  const fullSpeedState: RunState = { ...state, infra: { ...state.infra, migratingTo: null, migrationDaysLeft: null } };
+  const fullSpeedState: RunState = { ...state, infra: { ...state.infra, pending: null } };
   const fullProgress = tick(fullSpeedState).tickets.find((t) => t.id === ticket.id)!.progressPoints;
   assert.ok(slowProgress < fullProgress, 'migration must slow shipping, not just cost cash');
 
   for (let i = 0; i < days; i++) state = tick(state);
   assert.equal(state.infra.architecture, 'kubernetes');
-  assert.equal(state.infra.migratingTo, null);
+  assert.equal(state.infra.pending, null);
+});
+
+test('switching database engine requires availability on the current architecture', () => {
+  const state = started(); // monolith
+  const denied = apply(state, '/switch db managed confirm').state;
+  assert.equal(denied.infra.dbEngine, 'postgres', 'managed is not available on monolith');
+  assert.match(denied.events.at(-1)!.text, /isn't available/);
+});
+
+test('switching runtime charges a smaller cost than a full migration', () => {
+  const state = started();
+  const migrateCost = state.cash - apply(state, '/migrate kubernetes confirm').state.cash;
+  const switchCost = state.cash - apply(state, '/switch runtime go confirm').state.cash;
+  assert.ok(switchCost < migrateCost, 'a sub-architecture switch should be the cheaper bet');
+});
+
+test('a fresh cache warms up over a few Days, then reduces required capacity', () => {
+  let state: RunState = { ...started(), tickets: [], mrr: 20_000 };
+  state = apply(state, '/cache buy').state;
+  assert.equal(state.infra.cache.hitRate, 0, 'a freshly bought cache has not warmed up yet');
+
+  for (let i = 0; i < 4; i++) state = tick(state);
+  assert.ok(state.infra.cache.hitRate > 0, 'the cache must warm up over a few days');
+
+  const withCache = requiredCapacity(state);
+  const withoutCache: RunState = { ...state, infra: { ...state.infra, cache: { ...state.infra.cache, active: false } } };
+  assert.ok(withCache < requiredCapacity(withoutCache), 'a warmed-up cache must reduce required capacity');
+});
+
+test('a stale cache decays and can throw an integrity bug', () => {
+  const warmed: RunState = {
+    ...started(),
+    tickets: [],
+    infra: { ...started().infra, cache: { active: true, tier: 1, hitRate: 0.35, lastRefreshedDay: 1 } },
+  };
+  const staleDay = warmed.day + INFRA.cache.staleAfterDays + 1;
+  const state = tick({ ...warmed, day: staleDay - 1 });
+  assert.ok(state.infra.cache.hitRate < 0.35, 'a cache past its refresh window must decay');
+});
+
+test('a Ticket left open long enough escalates severity and never de-escalates', () => {
+  let state = started();
+  const bug = state.tickets.find(isOpen) ?? state.tickets[0];
+  state = { ...state, tickets: state.tickets.map((t) => (t.id === bug.id ? { ...t, type: 'bug' as const, severity: 'low' as const, createdDay: state.day } : t)) };
+  state = { ...state, day: state.day + 40 };
+  state = tick(state);
+  const escalated = state.tickets.find((t) => t.id === bug.id)!;
+  assert.ok(escalated.escalationLevel > 0);
+  assert.notEqual(effectiveSeverity(escalated), 'low');
+});
+
+test('an untouched Feature is withdrawn after its expiry day, an in-progress one is not', () => {
+  const base = started();
+  const feature = base.tickets.find((t) => t.type === 'feature')!;
+  let untouched: RunState = { ...base, tickets: base.tickets.map((t) => (t.id === feature.id ? { ...t, expiresDay: base.day + 1 } : t)) };
+  untouched = tick(untouched);
+  untouched = tick(untouched);
+  assert.equal(untouched.tickets.some((t) => t.id === feature.id), false, 'an untouched feature must expire');
+
+  const dev = base.developers[0];
+  let working: RunState = {
+    ...base,
+    tickets: base.tickets.map((t) => (t.id === feature.id ? { ...t, expiresDay: base.day + 1, status: 'in_progress' as const, assignedTo: dev.id } : t)),
+    developers: base.developers.map((d) => (d.id === dev.id ? { ...d, currentTicketId: feature.id } : d)),
+  };
+  working = tick(working);
+  working = tick(working);
+  assert.equal(working.tickets.some((t) => t.id === feature.id), true, 'an in-progress feature must not expire');
+});
+
+test('a promotable developer can be promoted, raising velocity tier and salary', () => {
+  let state = started();
+  const dev = state.developers[0];
+  state = { ...state, developers: state.developers.map((d) => (d.id === dev.id ? { ...d, proficiency: { ...d.proficiency, [topDiscipline(d.proficiency)]: 99 } } : d)) };
+  const before = state.developers[0];
+  state = apply(state, `/promote @${dev.handle}`).state;
+  const after = state.developers[0];
+  assert.notEqual(after.level, before.level);
+  assert.ok(after.salary > before.salary);
+  assert.ok(after.morale >= before.morale);
+});
+
+test('promotion is refused below the Proficiency threshold', () => {
+  const state = started();
+  const dev = state.developers[0];
+  const after = apply(state, `/promote @${dev.handle}`).state;
+  assert.equal(after.developers[0].level, dev.level, 'a founder is unlikely to already qualify, and should not silently promote');
 });
 
 test('a v3 save migrates and defaults to monolith', () => {

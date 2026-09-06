@@ -12,6 +12,7 @@ import TeamPanel from '@/components/TeamPanel';
 import ArchitecturePanel from '@/components/ArchitecturePanel';
 import BoardPanel from '@/components/BoardPanel';
 import Terminal from '@/components/Terminal';
+import ArchitectureOverlay from '@/components/ArchitectureOverlay';
 
 /** Real milliseconds per simulated Day at 1x. */
 const DAY_MS = 2200;
@@ -23,6 +24,7 @@ export default function GamePage() {
   // SSR -- otherwise server and client disagree and hydration fails.
   const [state, setState] = useState<RunState | null>(null);
   const [slots, setSlots] = useState<string[]>([]);
+  const [overlay, setOverlay] = useState<'none' | 'architecture'>('none');
 
   useEffect(() => {
     // Deliberate: the Run must be created after hydration. A Seed generated
@@ -146,11 +148,25 @@ export default function GamePage() {
           setState(fresh);
           return;
         }
+        case 'toggle_overlay': {
+          setOverlay((current) => (current === effect.overlay ? 'none' : effect.overlay));
+          break;
+        }
       }
     }
 
     setState(next);
   }, []);
+
+  // Escape closes the architecture overlay -- the one thing in the game that
+  // covers the dashboard, so it gets a dedicated way out (ADR-0002: still no
+  // clicking, just a second way to dismiss besides retyping the command).
+  useEffect(() => {
+    if (overlay === 'none') return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOverlay('none'); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [overlay]);
 
   if (!state) {
     return (
@@ -166,15 +182,19 @@ export default function GamePage() {
         <Header state={state} />
         <Metrics state={state} finances={finances(state)} />
 
-        <div className="stage-grid">
-          <div className="left-stack">
-            <BoardPanel state={state} />
+        {overlay === 'architecture' ? (
+          <ArchitectureOverlay state={state} />
+        ) : (
+          <div className="stage-grid">
+            <div className="left-stack">
+              <BoardPanel state={state} />
+            </div>
+            <div className="right-stack">
+              <TeamPanel state={state} />
+              <ArchitecturePanel state={state} />
+            </div>
           </div>
-          <div className="right-stack">
-            <TeamPanel state={state} />
-            <ArchitecturePanel state={state} />
-          </div>
-        </div>
+        )}
 
         <Terminal state={state} saveNames={slots} onCommand={onCommand} />
       </div>

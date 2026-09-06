@@ -5,7 +5,7 @@
  * editing this file and re-running `npm run balance` -- nothing else.
  */
 
-import { Discipline, Level, Severity, TicketType } from './types';
+import { Architecture, DbEngine, Discipline, Level, Runtime, Severity, TicketType } from './types';
 
 // ─── Stage tables ────────────────────────────────────────────────────────────
 
@@ -41,6 +41,12 @@ export interface StageTuning {
   trafficSpikeChance: number;
   /** Spike size range, as a multiplier applied to that Day's Traffic. */
   trafficSpikeMult: [number, number];
+  /**
+   * Multiplies each Developer's contribution to ticket arrival. >1 means the
+   * backlog outpaces hiring as the company scales -- a bigger, later-stage
+   * product generates more incoming work per head, not just more heads.
+   */
+  arrivalTeamMultiplier: number;
 }
 
 export const STAGES: StageTuning[] = [
@@ -59,54 +65,58 @@ export const STAGES: StageTuning[] = [
     trafficDailyGrowth: 0.006,
     trafficSpikeChance: 0.010,
     trafficSpikeMult: [1.3, 1.8],
+    arrivalTeamMultiplier: 1.0,
   },
   {
     key: 'seed',
     name: 'SEED',
-    goalMrr: 95_000,
+    goalMrr: 115_000,
     fundingCash: 150_000,
     salaryMult: 1.35,
     points: [4, 11],
     revenuePerPoint: [112, 180],
-    baseChurn: 0.048,
+    baseChurn: 0.062,
     arrivalSp: { feature: 0.42, bug: 0.17, tech_debt: 0.1 },
     candidateRate: 0.12,
     severityWeights: { low: 3, medium: 4, high: 3, critical: 1 },
     trafficDailyGrowth: 0.007,
     trafficSpikeChance: 0.012,
     trafficSpikeMult: [1.3, 2.0],
+    arrivalTeamMultiplier: 1.15,
   },
   {
     key: 'series_a',
     name: 'SERIES A',
-    goalMrr: 320_000,
+    goalMrr: 380_000,
     fundingCash: 560_000,
     salaryMult: 1.8,
     points: [5, 14],
     revenuePerPoint: [196, 306],
-    baseChurn: 0.066,
+    baseChurn: 0.080,
     arrivalSp: { feature: 0.46, bug: 0.2, tech_debt: 0.12 },
     candidateRate: 0.13,
     severityWeights: { low: 2, medium: 4, high: 3.5, critical: 1.6 },
     trafficDailyGrowth: 0.0062,
     trafficSpikeChance: 0.013,
     trafficSpikeMult: [1.4, 2.2],
+    arrivalTeamMultiplier: 1.5,
   },
   {
     key: 'ipo',
     name: 'IPO',
-    goalMrr: 580_000,
+    goalMrr: 680_000,
     fundingCash: 2_800_000,
     salaryMult: 2.4,
     points: [6, 17],
     revenuePerPoint: [357, 552],
-    baseChurn: 0.076,
+    baseChurn: 0.084,
     arrivalSp: { feature: 0.5, bug: 0.23, tech_debt: 0.14 },
     candidateRate: 0.13,
     severityWeights: { low: 1.5, medium: 3.5, high: 4, critical: 2.2 },
     trafficDailyGrowth: 0.0068,
     trafficSpikeChance: 0.014,
     trafficSpikeMult: [1.4, 2.5],
+    arrivalTeamMultiplier: 1.9,
   },
 ];
 
@@ -196,11 +206,28 @@ export const SIM = {
   /** Fraction of primary Proficiency they carry in a secondary Discipline. */
   secondarySpread: [0.15, 0.6] as [number, number],
 
-  /** Work created regardless of team size, so a solo founder still has a backlog. */
-  arrivalBaseSp: 0.45,
+  /**
+   * Work created regardless of team size, so a solo founder still has a
+   * backlog. Raised well above what one hire's worth of throughput absorbs --
+   * the backlog is meant to outpace hiring, not track it 1:1.
+   */
+  arrivalBaseSp: 0.4,
 
   /** Severity nudges Ticket size within the Stage band. */
   severitySize: { low: 0.8, medium: 1.0, high: 1.2, critical: 1.45 } as Record<Severity, number>,
+
+  /** Days a Ticket must sit open before its first Escalation; halves each step. */
+  escalationFirstDays: 30,
+  /** Escalation weight added to Churn/Drag per level past what Severity already covers. */
+  escalationPastCriticalWeight: 0.22,
+
+  /** A Feature this old is withdrawn if still untouched. Wider band for low-severity work. */
+  featureExpiryDays: { low: [85, 130], medium: [65, 105], high: [50, 85], critical: [38, 65] } as Record<Severity, [number, number]>,
+
+  /** Proficiency (in the top Discipline) needed to become Promotable to the next Level. */
+  promotionThreshold: { junior: 55, mid: 75, senior: 90, staff: Infinity } as Record<Level, number>,
+  /** Morale gained on promotion -- real, but not a full reset. */
+  promotionMoraleBoost: 15,
 
   /** Size of the Flavor buffer, and the level it refills at. */
   flavorTarget: 20,
@@ -257,6 +284,15 @@ export const INFRA = {
   /** Churn weight added per full unit of excess utilization (utilization 2.0 = 100% over). */
   overCapacityChurnPerUnit: 0.9,
 
+  /**
+   * Ceiling on how much open Tech Debt can inflate required Capacity. Without
+   * this, escalation has no floor to fall back to: a debt ticket nobody ever
+   * gets to keeps compounding forever, and required Capacity (and therefore
+   * infra cost, especially on the monolith's superlinear curve) genuinely goes
+   * to infinity rather than just getting very bad. Mirrors `maxChurnMultiplier`.
+   */
+  maxDebtInflation: 5.0,
+
   migration: {
     costBase: 15_000,
     /** Charged on top of the base, as a multiple of the current monthly infra bill. */
@@ -266,7 +302,99 @@ export const INFRA = {
     /** Compute is reset on completion to this multiple of the bare minimum needed. */
     startingSafetyMargin: 1.25,
   },
+
+  /** Switching a Sub-architecture (ADR-0005): the same mechanism, a smaller bet. */
+  subSwitch: {
+    costBase: 3_000,
+    costMonthsOfInfra: 1.5,
+    days: [4, 7] as [number, number],
+    velocityPenalty: 0.7,
+  },
+
+  cache: {
+    /** Index 0 is "no cache." Buying/upgrading moves one tier at a time. */
+    tiers: [
+      { monthlyCost: 0, maxHitRate: 0 },
+      { monthlyCost: 180, maxHitRate: 0.35 },
+      { monthlyCost: 420, maxHitRate: 0.55 },
+      { monthlyCost: 850, maxHitRate: 0.72 },
+    ],
+    /** Days after a refresh before hit rate starts decaying. */
+    staleAfterDays: 25,
+    /** Hit rate lost per Day once stale. */
+    decayPerDay: 0.018,
+    /** Below this fraction of the tier's max hit rate, staleness risks a bug. */
+    integrityRiskFraction: 0.4,
+    /** Daily chance of a stale-cache integrity Bug once under that fraction. */
+    integrityBugChance: 0.02,
+  },
 } as const;
+
+/**
+ * Sub-architectures (ADR-0005): a second axis nested under the main Architecture.
+ * `spDelta` is added to every rolled Ticket's story points (floored so a Ticket
+ * is never smaller than 1sp); `capacityMultiplier` and `costMultiplier` scale
+ * the resource it applies to. Availability of a Database engine depends on the
+ * main Architecture; Runtimes are available everywhere.
+ */
+export interface SubArchSpec {
+  label: string;
+  spDelta: number;
+  capacityMultiplier: number;
+  costMultiplier: number;
+  description: string;
+}
+
+export const DB_ENGINE_SPECS: Record<DbEngine, SubArchSpec & { availableOn: Architecture[] }> = {
+  postgres: {
+    label: 'Postgres',
+    spDelta: 1,
+    capacityMultiplier: 1.4,
+    costMultiplier: 1.0,
+    description: 'Relational discipline slows every ticket slightly; serves traffic efficiently once built.',
+    availableOn: ['monolith', 'kubernetes'],
+  },
+  mongo: {
+    label: 'Mongo',
+    spDelta: 0,
+    capacityMultiplier: 0.9,
+    costMultiplier: 1.0,
+    description: 'Flexible schema, nothing slows tickets down -- but scales traffic less efficiently per replica.',
+    availableOn: ['monolith', 'kubernetes', 'serverless'],
+  },
+  managed: {
+    label: 'Managed',
+    spDelta: 1,
+    capacityMultiplier: 1.6,
+    costMultiplier: 1.35,
+    description: 'A fully managed cloud database. Excellent at scale, and it costs like it.',
+    availableOn: ['kubernetes', 'serverless'],
+  },
+};
+
+export const RUNTIME_SPECS: Record<Runtime, SubArchSpec> = {
+  node: {
+    label: 'Node',
+    spDelta: 0,
+    capacityMultiplier: 1.0,
+    costMultiplier: 1.0,
+    description: 'Balanced default. No strong trade-off either way.',
+  },
+  go: {
+    label: 'Go',
+    spDelta: 1,
+    capacityMultiplier: 1.35,
+    costMultiplier: 1.0,
+    description: 'Compiled and efficient under load; slower to build against.',
+  },
+  python: {
+    label: 'Python',
+    spDelta: -1,
+    capacityMultiplier: 0.75,
+    costMultiplier: 0.92,
+    description: 'Fast to ship; costs more capacity per unit of traffic served.',
+  },
+};
 
 /** Mean story points of a Ticket rolled in this Stage, used to convert sp/day into arrivals. */
 export function expectedTicketPoints(stage: StageTuning): number {

@@ -1,7 +1,10 @@
 'use client';
 
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { ARCHITECTURES, COMMANDS, EventLevel, GameEvent, isOpen, RunState, topDiscipline } from '@/sim';
+import {
+  ARCHITECTURES, COMMANDS, DB_ENGINE_SPECS, DB_ENGINES, EventLevel, GameEvent, isOpen,
+  RunState, RUNTIME_SPECS, RUNTIMES, topDiscipline,
+} from '@/sim';
 
 interface TerminalProps {
   state: RunState;
@@ -77,14 +80,32 @@ function completionsFor(state: RunState, saves: string[], input: string): Comple
       return saves.filter(match).map((n) => ({ value: n, hint: 'save slot' }));
     case 'architecture':
       return ARCHITECTURES.filter((a) => a !== state.infra.architecture && match(a)).map((a) => ({
-        value: a, hint: a === state.infra.migratingTo ? 'migration already in progress' : 'migrate here',
+        value: a, hint: 'migrate here',
       }));
     case 'infratarget':
       return ['compute', 'db'].filter(match).map((v) => ({
         value: v, hint: v === 'compute' ? `${state.infra.compute} now` : `${state.infra.dbReplicas} replicas now`,
       }));
     case 'confirm':
-      return ['confirm'].filter(match).map((v) => ({ value: v, hint: 'commit to this migration' }));
+      return ['confirm'].filter(match).map((v) => ({ value: v, hint: 'commit this change' }));
+    case 'boardfilter':
+      return ['all', 'bug', 'feature', 'debt', 'stale'].filter(match).map((v) => ({ value: v, hint: 'filter' }));
+    case 'switchaxis':
+      return ['db', 'runtime'].filter(match).map((v) => ({ value: v, hint: v === 'db' ? 'database engine' : 'compute runtime' }));
+    case 'dbengine': {
+      // The second /switch argument depends on the first: db lists engines, runtime lists runtimes.
+      const axis = tokens[1]?.toLowerCase();
+      if (axis === 'runtime') {
+        return RUNTIMES.filter(match).map((r) => ({
+          value: r, hint: r === state.infra.runtime ? 'current' : RUNTIME_SPECS[r].description,
+        }));
+      }
+      return DB_ENGINES.filter((e) => DB_ENGINE_SPECS[e].availableOn.includes(state.infra.architecture) && match(e)).map((e) => ({
+        value: e, hint: e === state.infra.dbEngine ? 'current' : DB_ENGINE_SPECS[e].description,
+      }));
+    }
+    case 'cacheaction':
+      return ['buy', 'upgrade', 'refresh'].filter(match).map((v) => ({ value: v, hint: 'cache' }));
     default:
       return [];
   }

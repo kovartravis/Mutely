@@ -7,13 +7,18 @@
  */
 
 import {
-  burn, churnRate, computeEfficiency, effectiveVelocity, requiredCapacity, utilization, velocityMultiplier,
+  burn, churnRate, computeEfficiency, effectiveSeverity, effectiveVelocity,
+  requiredCapacity, utilization, velocityMultiplier,
 } from './economy';
 import { createRng, Rng } from './rng';
 import { rollCandidate, rollTicket } from './roll';
-import { expectedTicketPoints, INFRA, SIM, stageAt, STAGES } from './tuning';
+import {
+  DB_ENGINE_SPECS, expectedTicketPoints, INFRA, RUNTIME_SPECS, SIM, stageAt, STAGES,
+} from './tuning';
 import { idleDevelopers, planAssignments } from './triage';
-import { Developer, EventLevel, GameEvent, RunState, TicketType } from './types';
+import {
+  Architecture, DbEngine, Developer, EventLevel, GameEvent, Runtime, RunState, Ticket, TicketType,
+} from './types';
 
 const MAX_EVENTS = 400;
 /**
@@ -39,7 +44,11 @@ function draft(state: RunState): RunState {
       usedTitles: state.flavor.usedTitles.slice(),
       offline: state.flavor.offline,
     },
-    infra: { ...state.infra },
+    infra: {
+      ...state.infra,
+      cache: { ...state.infra.cache },
+      pending: state.infra.pending ? { ...state.infra.pending } : null,
+    },
   };
 }
 
@@ -81,7 +90,7 @@ function doWork(state: RunState): void {
     }
 
     const stress =
-      SIM.moraleDrain[ticket.severity] * (ticket.type === 'bug' ? SIM.bugMoraleMultiplier : 1);
+      SIM.moraleDrain[effectiveSeverity(ticket)] * (ticket.type === 'bug' ? SIM.bugMoraleMultiplier : 1);
     const before = dev.morale;
     dev.morale = Math.max(0, Math.min(100, dev.morale - stress + SIM.moraleBaselineRecovery));
 
@@ -164,30 +173,116 @@ function doTraffic(state: RunState, rng: Rng): void {
   }
 }
 
-/** Advances an in-progress Migration; completes it once its Days run out. */
-function doMigration(state: RunState): void {
+/**
+ * Advances whatever infra change is pending (ADR-0005: main Architecture, the
+ * Database engine, or the Runtime -- only one at a time). Completes it once
+ * its Days run out.
+ */
+function doPendingChange(state: RunState): void {
   const infra = state.infra;
-  if (infra.migratingTo === null || infra.migrationDaysLeft === null) return;
+  const pending = infra.pending;
+  if (!pending) return;
 
-  infra.migrationDaysLeft -= 1;
-  if (infra.migrationDaysLeft > 0) return;
+  pending.daysLeft -= 1;
+  if (pending.daysLeft > 0) return;
+  infra.pending = null;
 
-  const to = infra.migratingTo;
-  infra.architecture = to;
-  infra.migratingTo = null;
-  infra.migrationDaysLeft = null;
+  if (pending.kind === 'architecture') {
+    const to = pending.target as Architecture;
+    infra.architecture = to;
 
-  // Compute is reset to roughly what today's Traffic needs under the new
-  // Architecture, so finishing a migration doesn't hand the player either an
-  // instant shortfall or free excess capacity.
-  const need = requiredCapacity(state) * INFRA.migration.startingSafetyMargin;
-  const perUnit =
-    to === 'monolith' ? INFRA.monolith.capacityPerUnit
-    : to === 'kubernetes' ? INFRA.kubernetes.capacityPerNode
-    : INFRA.serverless.capacityPerConcurrencyUnit;
-  infra.compute = Math.max(1, Math.ceil(need / perUnit / Math.max(computeEfficiency(state), 0.01)));
+    // Compute is reset to roughly what today's Traffic needs under the new
+    // Architecture, so finishing a migration doesn't hand the player either
+    // an instant shortfall or free excess capacity.
+    const need = requiredCapacity(state) * INFRA.migration.startingSafetyMargin;
+    const perUnit =
+      to === 'monolith' ? INFRA.monolith.capacityPerUnit
+      : to === 'kubernetes' ? INFRA.kubernetes.capacityPerNode
+      : INFRA.serverless.capacityPerConcurrencyUnit;
+    const runtimeMult = RUNTIME_SPECS[infra.runtime].capacityMultiplier;
+    infra.compute = Math.max(1, Math.ceil(need / perUnit / runtimeMult / Math.max(computeEfficiency(state), 0.01)));
+    pushEvent(state, 'good', `Migration complete -- now running on ${to}.`);
+  } else if (pending.kind === 'db') {
+    infra.dbEngine = pending.target as DbEngine;
+    pushEvent(state, 'good', `Database switch complete -- now running ${DB_ENGINE_SPECS[infra.dbEngine].label}.`);
+  } else {
+    infra.runtime = pending.target as Runtime;
+    pushEvent(state, 'good', `Runtime switch complete -- now running ${RUNTIME_SPECS[infra.runtime].label}.`);
+  }
+}
 
-  pushEvent(state, 'good', `Migration complete -- now running on ${to}.`);
+/**
+ * How many times a Ticket should have Escalated by now, purely a function of
+ * age -- recomputed each Day rather than incremented, so there is no separate
+ * "next threshold" state to drift out of sync. Each step's wait halves, down
+ * to a floor, so an old Ticket escalates faster and faster.
+ */
+function escalationsForAge(ageDays: number): number {
+  let count = 0;
+  let interval: number = SIM.escalationFirstDays;
+  let cumulative: number = interval;
+  while (ageDays >= cumulative) {
+    count++;
+    interval = Math.max(4, interval / 2);
+    cumulative += interval;
+  }
+  return count;
+}
+
+/** Bugs and Tech Debt left open get worse; the effect is derived, this just tracks the level. */
+function doEscalation(state: RunState): void {
+  for (const t of state.tickets) {
+    if (t.status === 'done' || (t.type !== 'bug' && t.type !== 'tech_debt')) continue;
+
+    const before = t.escalationLevel;
+    t.escalationLevel = escalationsForAge(state.day - t.createdDay);
+    if (t.escalationLevel > before) {
+      const kind = t.type === 'bug' ? 'BUG' : 'DEBT';
+      pushEvent(
+        state, 'warn',
+        `${kind} #${t.handle} escalated to ${effectiveSeverity(t)} -- "${t.title}" has been open ${state.day - t.createdDay} days.`,
+      );
+    }
+  }
+}
+
+/** Features left untouched too long are withdrawn -- lost opportunity, not a growing liability. */
+function doExpiry(state: RunState): void {
+  const expiring = state.tickets.filter(
+    (t) => t.type === 'feature' && t.status === 'backlog' && t.expiresDay !== null && state.day >= t.expiresDay,
+  );
+  for (const t of expiring) {
+    pushEvent(state, 'warn', `FEAT #${t.handle} "${t.title}" withdrawn -- ${state.day - t.createdDay} days untouched, ${money(t.revenue)}/mo lost.`);
+  }
+  if (expiring.length > 0) {
+    const expiredIds = new Set(expiring.map((t) => t.id));
+    state.tickets = state.tickets.filter((t) => !expiredIds.has(t.id));
+  }
+}
+
+/**
+ * The Cache warms toward its tier's ceiling after a refresh, then decays once
+ * stale. A badly stale Cache risks throwing a real integrity Bug -- upkeep,
+ * not a one-time purchase.
+ */
+function doCache(state: RunState, rng: Rng): void {
+  const cache = state.infra.cache;
+  if (!cache.active) return;
+
+  const tierMax = INFRA.cache.tiers[cache.tier].maxHitRate;
+  const age = state.day - cache.lastRefreshedDay;
+
+  if (age <= INFRA.cache.staleAfterDays) {
+    cache.hitRate = Math.min(tierMax, cache.hitRate + 0.05);
+    return;
+  }
+
+  cache.hitRate = Math.max(0, cache.hitRate - INFRA.cache.decayPerDay);
+  if (cache.hitRate < tierMax * INFRA.cache.integrityRiskFraction && rng.chance(INFRA.cache.integrityBugChance)) {
+    const bug: Ticket = { ...rollTicket(state, rng, 'bug'), severity: 'high' };
+    state.tickets.push(bug);
+    pushEvent(state, 'alarm', `Stale cache produced a data-integrity bug: #${bug.handle} "${bug.title}".`);
+  }
 }
 
 /** Alerts once when the system crosses into Over Capacity (ADR-0004). */
@@ -210,8 +305,10 @@ function doFinances(state: RunState): void {
 function doArrivals(state: RunState, rng: Rng): void {
   const stage = stageAt(state.stageIndex);
   const avgPoints = expectedTicketPoints(stage);
-  // Work scales with headcount, so hiring buys throughput and inbox at once.
-  const scale = SIM.arrivalBaseSp + state.developers.length;
+  // Work scales with headcount, but the per-head multiplier rises by Stage --
+  // a bigger, later-stage product throws off more incoming work per engineer,
+  // not just more heads. The backlog is meant to outpace hiring, not track it.
+  const scale = SIM.arrivalBaseSp + state.developers.length * stage.arrivalTeamMultiplier;
 
   for (const type of ['feature', 'bug', 'tech_debt'] as TicketType[]) {
     if (!rng.chance((stage.arrivalSp[type] * scale) / avgPoints)) continue;
@@ -289,10 +386,13 @@ export function tick(state: RunState): RunState {
 
   doWork(next);
   doAttrition(next, rng);
+  doEscalation(next);
+  doExpiry(next);
   doFinances(next);
   const wasOver = utilization(next) > 1;
   doTraffic(next, rng);
-  doMigration(next);
+  doCache(next, rng);
+  doPendingChange(next);
   doArrivals(next, rng);
   doAutoAssign(next);
   doInfraAlerts(next, wasOver);
