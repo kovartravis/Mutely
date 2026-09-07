@@ -88,15 +88,15 @@ for a competent human, and reports how far each Run got:
 ```
 MUTELY BALANCE  300 runs, 1600 day cap
 
-  won         156  52.0%   median day 1128
-  bankrupt    144  48.0%   median day 1000
+  won         144  48.0%   median day 1125
+  bankrupt    156  52.0%   median day 605
   timeout       0   0.0%
 
   STAGE                 reached      cleared
-  GARAGE     ████████████████████  300    264   88%
-  SEED       ██████████████████··  264    259   98%
-  SERIES A   █████████████████···  259    247   95%
-  IPO        ████████████████····  247    156   63%
+  GARAGE     ████████████████████  300    244   81%
+  SEED       ████████████████····  244    218   89%
+  SERIES A   ███████████████·····  218    216   99%
+  IPO        ██████████████······  216    144   67%
 ```
 
 The target is roughly a 50% overall win rate with a rising curve -- Garage as a tutorial, IPO as a
@@ -134,6 +134,20 @@ missed the main-Architecture migration check entirely -- a solo founder could st
 kubernetes, eating a large cash cost and a 50%-velocity penalty alone. Any new "don't do this while
 still tiny" guard needs to cover every trigger that shares the guard's premise, not just the ones
 added in the same edit.
+
+**2026-09-06, early-game retune.** Player feedback: the early Stages felt too easy (Garage was
+clearing 88%, Seed 98%). Tightened Garage (goal, base churn, arrival) and Seed (goal, base churn,
+arrival, arrivalTeamMultiplier) specifically, leaving Series A/IPO's own numbers close to where they
+were. Two things worth remembering:
+
+- The harness is fully deterministic (seeds `1..N`), so re-running with the *same* `--runs` value
+  is not a second sample -- it reproduces byte-identical output. Confirm stability with a
+  *different* `N` (e.g. 300 then 400), not a repeated run.
+- Series A's own clear rate barely moved even after raising its churn -- a survivorship effect. Once
+  Garage/Seed are the harder gate, whoever reaches Series A is disproportionately well-run, and a
+  moderate churn change there mostly just tightens their IPO margin rather than failing them at
+  Series A itself. Don't chase a stage's raw clear-rate number past the point where a knob stops
+  visibly moving it; check the *downstream* stage instead.
 
 Because every Roll derives from the Run's Seed, a scenario is reproducible: `/seed` prints it, and
 the same Seed replays the same bugs on the same days.
