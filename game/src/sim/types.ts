@@ -37,6 +37,8 @@ export interface Developer {
   noticeDaysLeft: number | null;
   /** Day they joined, for tenure display. */
   joinedDay: number;
+  /** Remote only: which unlocked Country they're based in. Null for In-person or pre-Seed hires. */
+  country: string | null;
 }
 
 export interface Candidate {
@@ -49,6 +51,8 @@ export interface Candidate {
   blurb: string;
   /** Day the candidate withdraws if not hired. */
   expiresDay: number;
+  /** Remote only: which unlocked Country they're from. Null for In-person. */
+  country: string | null;
 }
 
 // ─── Tickets ─────────────────────────────────────────────────────────────────
@@ -165,6 +169,32 @@ export interface Infra {
   pending: PendingChange | null;
 }
 
+// ─── Workplace ───────────────────────────────────────────────────────────────
+
+export const WORK_MODES = ['inperson', 'remote'] as const;
+export type WorkMode = (typeof WORK_MODES)[number];
+
+/** A pending Work Mode switch, or an Office relocation. Only one at a time. */
+export interface WorkplacePending {
+  kind: 'mode' | 'relocate';
+  target: WorkMode | string; // WorkMode for a mode switch, a city key for a relocation
+  /** Mode switches landing on In-person only: the destination City, decided up front. */
+  destCity?: string | null;
+  daysLeft: number;
+}
+
+export interface Workplace {
+  /** null until the Seed-transition choice is made -- the clock will not run past that point. */
+  mode: WorkMode | null;
+  /** In-person only: the current fictional City. */
+  officeCity: string | null;
+  /** In-person only: headcount capacity. Hiring is refused past it until expanded. */
+  officeSize: number;
+  /** Remote only: fictional Countries currently unlocked for hiring. */
+  unlockedCountries: string[];
+  pending: WorkplacePending | null;
+}
+
 // ─── Run ─────────────────────────────────────────────────────────────────────
 
 export type RunStatus = 'running' | 'paused' | 'won' | 'lost';
@@ -194,8 +224,15 @@ export interface RunState {
   speed: number;
   /** When on, the Day tick puts idle Developers on their best Ticket by Triage. */
   autoAssign: boolean;
+  /**
+   * When set, Triage strongly prefers this Ticket type while autoAssign is on
+   * -- but never leaves a Developer idle just because none are open right
+   * now; it falls back to the next-best work of any type.
+   */
+  autoFocus: TicketType | null;
 
   infra: Infra;
+  workplace: Workplace;
 
   cash: number;
   mrr: number;

@@ -2,14 +2,19 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { apply } from './commands';
-import { churnRate, computeEfficiency, drag, effectiveCapacity, effectiveSeverity, finances as economyFinances, isOpen, requiredCapacity } from './economy';
+import {
+  churnRate, computeEfficiency, coordinationDrag, drag, effectiveCapacity, effectiveSeverity,
+  finances as economyFinances, isOpen, levelShare, marketPullChance, officeCost, requiredCapacity,
+  velocityMultiplier,
+} from './economy';
 import { popTicketFlavor } from './flavor';
 import { createRng } from './rng';
-import { rollTicket, topDiscipline } from './roll';
+import { playTurn } from './policy';
+import { isPromotable, rollCandidate, rollTicket, topDiscipline } from './roll';
 import { deserialise, newRun, serialise } from './state';
 import { run, tick } from './tick';
 import { idleDevelopers, planAssignments } from './triage';
-import { INFRA, SIM } from './tuning';
+import { INFRA, REMOTE_COUNTRIES, SIM, WORKPLACE } from './tuning';
 import { RunState } from './types';
 
 const started = () => apply(newRun('TEST', 4242), '/speed 1').state;
@@ -517,4 +522,331 @@ test('/scale db still works normally on postgres or mongo', () => {
   const state = started(); // monolith + postgres
   const after = apply(state, '/scale db +2').state;
   assert.equal(after.infra.dbReplicas, state.infra.dbReplicas + 2);
+});
+
+// ─── Auto-focus ────────────────────────────────────────────────────────────────
+
+test('focus makes a lower-value ticket of that type win over a higher-value one of another type', () => {
+  const base = started();
+  const dev = base.developers[0];
+  const feature = { ...base.tickets[0], id: 'f1', type: 'feature' as const, status: 'backlog' as const, revenue: 5000, storyPoints: 3, progressPoints: 0, assignedTo: null };
+  const bug = { ...base.tickets[0], id: 'b1', type: 'bug' as const, status: 'backlog' as const, severity: 'low' as const, escalationLevel: 0, storyPoints: 3, progressPoints: 0, assignedTo: null };
+  const state: RunState = { ...base, mrr: 30_000, tickets: [feature, bug] };
+
+  const unfocused = planAssignments(state, [dev], null);
+  assert.equal(unfocused[0]?.ticket.id, 'f1', 'without focus the higher-value feature should win');
+
+  const focused = planAssignments(state, [dev], 'bug');
+  assert.equal(focused[0]?.ticket.id, 'b1', 'focused on bug, the bug must win despite lower raw value');
+});
+
+test('focus falls back to other work rather than leaving a developer idle', () => {
+  const base = started();
+  const dev = base.developers[0];
+  const feature = { ...base.tickets[0], id: 'f1', type: 'feature' as const, status: 'backlog' as const, revenue: 500, storyPoints: 3, progressPoints: 0, assignedTo: null };
+  const state: RunState = { ...base, tickets: [feature] }; // no bugs open at all
+
+  const plan = planAssignments(state, [dev], 'bug');
+  assert.equal(plan[0]?.ticket.id, 'f1', 'no bug open -- must still assign the feature, not sit idle');
+});
+
+test('/auto bug sets and shows focus, /auto all clears it', () => {
+  let state = apply(started(), '/auto bug').state;
+  assert.equal(state.autoFocus, 'bug');
+  assert.equal(state.autoAssign, true);
+
+  state = apply(state, '/auto all').state;
+  assert.equal(state.autoFocus, null);
+  assert.equal(state.autoAssign, true);
+});
+
+test('/auto debt maps to the tech_debt ticket type', () => {
+  const state = apply(started(), '/auto debt').state;
+  assert.equal(state.autoFocus, 'tech_debt');
+});
+
+test('/auto off does not clear an existing focus, only pauses assignment', () => {
+  let state = apply(started(), '/auto bug').state;
+  state = apply(state, '/auto off').state;
+  assert.equal(state.autoAssign, false);
+  assert.equal(state.autoFocus, 'bug', 'focus should persist so turning auto back on resumes it');
+});
+
+test('standing auto-assign in the tick respects the active focus', () => {
+  const base = started();
+  const dev = base.developers[0];
+  let state: RunState = {
+    ...base,
+    mrr: 30_000,
+    autoAssign: true,
+    autoFocus: 'bug',
+    developers: base.developers.map((d) => ({ ...d, currentTicketId: null })),
+    tickets: [
+      { ...base.tickets[0], id: 'f1', type: 'feature', status: 'backlog', revenue: 5000, storyPoints: 3, progressPoints: 0, assignedTo: null },
+      { ...base.tickets[0], id: 'b1', type: 'bug', status: 'backlog', severity: 'low', escalationLevel: 0, storyPoints: 3, progressPoints: 0, assignedTo: null },
+    ],
+  };
+  state = tick(state);
+  const assignedId = state.developers.find((d) => d.id === dev.id)!.currentTicketId;
+  assert.equal(assignedId, 'b1', 'the tick itself must honor autoFocus, not just the one-shot command');
+});
+
+test('a v5 save migrates and defaults to no focus', () => {
+  const legacy = JSON.parse(serialise(newRun('OLD', 23))) as Record<string, unknown>;
+  legacy.version = 5;
+  delete legacy.autoFocus;
+  const loaded = deserialise(JSON.stringify(legacy));
+  assert.ok(loaded, 'a v5 save should still load');
+  assert.equal(loaded.autoFocus, null);
+});
+
+// ─── Team composition and Market Pull ─────────────────────────────────────────
+
+test('Junior and Mid have zero Market Pull, regardless of team composition', () => {
+  const base = started();
+  const allJunior: RunState = {
+    ...base,
+    developers: base.developers.map((d) => ({ ...d, level: 'junior' as const, morale: 100 })),
+  };
+  assert.equal(marketPullChance(allJunior, 'junior'), 0);
+  const allMid: RunState = {
+    ...base,
+    developers: base.developers.map((d) => ({ ...d, level: 'mid' as const, morale: 100 })),
+  };
+  assert.equal(marketPullChance(allMid, 'mid'), 0);
+});
+
+test('Market Pull applies a baseline even exactly at the Target Mix, and more when over it', () => {
+  const base = started();
+  const onTarget: RunState = {
+    ...base,
+    developers: Array.from({ length: 100 }, (_, i) => ({
+      ...base.developers[0], id: `d${i}`, handle: `d${i}`,
+      level: i < 8 ? ('staff' as const) : ('junior' as const), // staff exactly at its 8% target
+    })),
+  };
+  const baseline = marketPullChance(onTarget, 'staff');
+  assert.ok(baseline > 0, 'even on-target, staff must carry a nonzero baseline chance');
+
+  const overTarget: RunState = {
+    ...base,
+    developers: onTarget.developers.map((d, i) => (i < 30 ? { ...d, level: 'staff' as const } : d)), // now 30% staff
+  };
+  assert.ok(marketPullChance(overTarget, 'staff') > baseline, 'exceeding the target must raise the chance further');
+});
+
+test('levelShare reads team composition correctly', () => {
+  const base = started();
+  const state: RunState = {
+    ...base,
+    developers: [
+      { ...base.developers[0], id: 'd1', level: 'senior' },
+      { ...base.developers[0], id: 'd2', level: 'senior' },
+      { ...base.developers[0], id: 'd3', level: 'junior' },
+    ],
+  };
+  assert.ok(Math.abs(levelShare(state, 'senior') - 2 / 3) < 1e-9);
+});
+
+test('Staff requires a much higher Proficiency than the old Senior threshold', () => {
+  assert.ok(SIM.promotionThreshold.senior > 90, 'the threshold itself must now exceed the old bar');
+
+  const dev = { ...started().developers[0], level: 'senior' as const };
+  const top = topDiscipline(dev.proficiency);
+  const at90 = { ...dev, proficiency: { ...dev.proficiency, [top]: 90 } };
+  assert.equal(isPromotable(at90), false, 'a proficiency of 90 -- promotable under the old bar -- must not qualify anymore');
+
+  const atNewBar = { ...dev, proficiency: { ...dev.proficiency, [top]: SIM.promotionThreshold.senior } };
+  assert.equal(isPromotable(atNewBar), true);
+});
+
+test('promotion is never blocked by an over-target Level, just warned about', () => {
+  const base = started();
+  const dev = base.developers[0];
+  const top = topDiscipline(dev.proficiency);
+  // Team already saturated with staff, well over the 8% target.
+  const state: RunState = {
+    ...base,
+    developers: [
+      { ...dev, proficiency: { ...dev.proficiency, [top]: SIM.promotionThreshold.senior + 1 }, level: 'senior' as const },
+      ...Array.from({ length: 5 }, (_, i) => ({ ...dev, id: `s${i}`, handle: `s${i}`, level: 'staff' as const })),
+    ],
+  };
+  const after = apply(state, `/promote @${dev.handle}`).state;
+  assert.equal(after.developers[0].level, 'staff', 'over-target composition must not block a proficiency-earned promotion');
+  assert.match(after.events.at(-1)!.text, /Market Pull|target/i);
+});
+
+test('a Market Pull notice is retainable the same way as a morale-driven one', () => {
+  const base = started();
+  const dev = { ...base.developers[0], level: 'staff' as const, noticeDaysLeft: 5, morale: 100 };
+  const state: RunState = { ...base, developers: [dev] };
+  const after = apply(state, `/bonus @${dev.handle} 5000`).state;
+  assert.equal(after.developers[0].noticeDaysLeft, null, 'a bonus must retain a Market Pull notice just like a morale one');
+});
+
+test('a top-heavy, high-morale team still loses people to Market Pull over time', () => {
+  const base = started();
+  let state: RunState = {
+    ...base,
+    developers: Array.from({ length: 10 }, (_, i) => ({
+      ...base.developers[0], id: `s${i}`, handle: `s${i}`, level: 'staff' as const, morale: 100,
+    })),
+  };
+  let sawNotice = false;
+  for (let i = 0; i < 150 && !sawNotice; i++) {
+    state = { ...state, developers: state.developers.map((d) => ({ ...d, morale: 100 })) };
+    state = tick(state);
+    sawNotice = state.developers.some((d) => d.noticeDaysLeft !== null);
+  }
+  assert.ok(sawNotice, 'a 100% staff team, all at full morale, must still see Market Pull fire eventually');
+});
+
+// ─── Workplace ───────────────────────────────────────────────────────────────
+
+test('the clock will not run past Seed until a Work Mode is chosen', () => {
+  const base: RunState = { ...started(), stageIndex: 1 };
+  assert.equal(base.status, 'running');
+  const after = tick(base);
+  assert.equal(after.day, base.day, 'day must not advance while the forced Work Mode choice is outstanding');
+});
+
+test('/resume and /speed refuse to start the clock before a Work Mode is chosen', () => {
+  const base: RunState = { ...started(), stageIndex: 1, speed: 0, status: 'paused' };
+  const resumed = apply(base, '/resume').state;
+  assert.equal(resumed.status, 'paused', '/resume must refuse until a Work Mode is chosen');
+  const sped = apply(base, '/speed 2').state;
+  assert.equal(sped.speed, 0, '/speed must refuse to set a nonzero speed until a Work Mode is chosen');
+});
+
+test('/workmode inperson makes the forced first choice for free, with no pending change', () => {
+  const base: RunState = { ...started(), stageIndex: 1 };
+  const after = apply(base, '/workmode inperson fernhaven').state;
+  assert.equal(after.workplace.mode, 'inperson');
+  assert.equal(after.workplace.officeCity, 'fernhaven');
+  assert.equal(after.workplace.pending, null, 'the forced first choice must not be a pending change');
+  assert.equal(after.cash, base.cash, 'the forced first choice must be free');
+});
+
+test('/workmode remote makes the forced first choice for free, starting from Kestria', () => {
+  const base: RunState = { ...started(), stageIndex: 1 };
+  const after = apply(base, '/workmode remote').state;
+  assert.equal(after.workplace.mode, 'remote');
+  assert.deepEqual(after.workplace.unlockedCountries, ['kestria']);
+  assert.equal(after.cash, base.cash);
+});
+
+test('Office rent is the only new burn once In-person is chosen', () => {
+  const base: RunState = { ...started(), stageIndex: 1 };
+  const before = economyFinances(base).burn;
+  const chosen = apply(base, '/workmode inperson meridian').state;
+  const rent = officeCost(chosen.workplace);
+  assert.ok(rent > 0, 'Meridian must carry real rent');
+  assert.equal(economyFinances(chosen).burn, before + rent);
+});
+
+test('hiring is refused once the Office is full, and /office expand raises the cap', () => {
+  const base: RunState = { ...started(), stageIndex: 1 };
+  let state = apply(base, '/workmode inperson fernhaven').state;
+  state = { ...state, cash: 1_000_000, workplace: { ...state.workplace, officeSize: state.developers.length } };
+  const rng = createRng(state.rng.seed, state.rng.cursor);
+  const candidate = rollCandidate(state, rng);
+  state = { ...state, candidates: [candidate] };
+
+  const blocked = apply(state, `/hire @${candidate.handle}`).state;
+  assert.equal(blocked.developers.length, state.developers.length, 'a full Office must refuse the hire');
+  assert.equal(blocked.candidates.length, 1, 'the candidate must not be consumed by a refused hire');
+
+  const expanded = apply(state, '/office expand').state;
+  assert.equal(expanded.workplace.officeSize, state.workplace.officeSize + WORKPLACE.officeExpandSeats);
+  const hired = apply(expanded, `/hire @${candidate.handle}`).state;
+  assert.equal(hired.developers.length, state.developers.length + 1, 'hiring must succeed once there is room');
+});
+
+test('/remote unlock pays cash and adds a Country to the pool', () => {
+  const base: RunState = { ...started(), stageIndex: 1, cash: 1_000_000 };
+  let state = apply(base, '/workmode remote').state;
+  const target = Object.keys(REMOTE_COUNTRIES).find((k) => k !== 'kestria')!;
+  const before = state.cash;
+  state = apply(state, `/remote unlock ${target}`).state;
+  assert.ok(state.workplace.unlockedCountries.includes(target));
+  assert.equal(state.cash, before - REMOTE_COUNTRIES[target].unlockCost);
+});
+
+test('Coordination Drag reduces Velocity once hiring spreads across multiple Countries', () => {
+  const base: RunState = { ...started(), stageIndex: 1 };
+  const remote = apply(base, '/workmode remote').state;
+  const spread: RunState = {
+    ...remote,
+    workplace: { ...remote.workplace, unlockedCountries: ['kestria', 'oakmere'] },
+    developers: [
+      { ...remote.developers[0], id: 'd1', handle: 'd1', country: 'kestria' },
+      { ...remote.developers[0], id: 'd2', handle: 'd2', country: 'oakmere' },
+    ],
+  };
+  assert.ok(coordinationDrag(spread) < 1, 'spreading across two active Countries must cost Velocity');
+  assert.ok(velocityMultiplier(spread) < velocityMultiplier(remote));
+});
+
+test('Coordination Drag stays neutral In-person, or Remote with no active Country spread', () => {
+  const base: RunState = { ...started(), stageIndex: 1 };
+  const remote = apply(base, '/workmode remote').state;
+  assert.equal(coordinationDrag(remote), 1, 'the founder alone -- not yet even Remote-hired -- must carry no drag');
+
+  const inperson = apply(base, '/workmode inperson fernhaven').state;
+  assert.equal(coordinationDrag(inperson), 1, 'In-person must never carry Coordination Drag');
+});
+
+test('/workmode switch previews for free, then charges cash and starts a pending change on confirm', () => {
+  const base: RunState = { ...started(), stageIndex: 1, cash: 1_000_000 };
+  const state = apply(base, '/workmode inperson fernhaven').state;
+
+  const preview = apply(state, '/workmode remote').state;
+  assert.equal(preview.workplace.pending, null, 'without confirm, nothing should be committed yet');
+  assert.equal(preview.cash, state.cash, 'without confirm, no cash should be charged');
+  assert.equal(preview.workplace.mode, 'inperson');
+
+  const confirmed = apply(state, '/workmode remote confirm').state;
+  assert.ok(confirmed.workplace.pending, 'a confirmed switch must start a pending change');
+  assert.equal(confirmed.workplace.mode, 'inperson', 'the mode itself only changes once the pending change completes');
+  assert.ok(confirmed.cash < state.cash, 'a Work Mode switch must charge cash up front');
+
+  const finished = run(confirmed, 30);
+  assert.equal(finished.workplace.pending, null, 'the pending change must complete within a reasonable number of days');
+  assert.equal(finished.workplace.mode, 'remote');
+});
+
+test('completing a Work Mode switch can cost staff outright, non-retainably', () => {
+  const base: RunState = { ...started(), stageIndex: 1, cash: 10_000_000 };
+  const inperson = apply(base, '/workmode inperson fernhaven').state;
+  const bigTeam: RunState = {
+    ...inperson,
+    developers: Array.from({ length: 20 }, (_, i) => ({ ...inperson.developers[0], id: `d${i}`, handle: `d${i}` })),
+  };
+  const confirmed = apply(bigTeam, '/workmode remote confirm').state;
+  const before = confirmed.developers.length;
+  const after = run(confirmed, 30);
+  assert.ok(after.developers.length < before, 'at least one of 20 developers should decline to make the move');
+  assert.equal(after.workplace.mode, 'remote');
+});
+
+test('a v6 save migrates and defaults to no Work Mode chosen', () => {
+  const legacy = JSON.parse(serialise(newRun('OLD', 22))) as Record<string, unknown>;
+  legacy.version = 6;
+  delete legacy.workplace;
+  const loaded = deserialise(JSON.stringify(legacy));
+  assert.ok(loaded, 'a v6 save should still load');
+  assert.equal(loaded.workplace.mode, null);
+  assert.equal(loaded.workplace.officeSize, WORKPLACE.startingOfficeSize);
+});
+
+test('the reference player always resolves the forced Work Mode choice promptly', () => {
+  let state = newRun('POLICY', 7);
+  for (let day = 0; day < 400 && state.status === 'running'; day++) {
+    state = playTurn(state);
+    state = tick(state);
+  }
+  if (state.stageIndex >= 1) {
+    assert.notEqual(state.workplace.mode, null, 'the reference player must never leave Seed+ without choosing a Work Mode');
+  }
 });

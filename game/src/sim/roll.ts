@@ -7,7 +7,7 @@
 import { popPersonFlavor, popTicketFlavor } from './flavor';
 import { developerHandle, nextTicketHandle } from './handles';
 import { Rng } from './rng';
-import { DB_ENGINE_SPECS, disciplineWeights, RUNTIME_SPECS, salaryFor, SIM, stageAt } from './tuning';
+import { DB_ENGINE_SPECS, disciplineWeights, OFFICE_CITIES, REMOTE_COUNTRIES, RUNTIME_SPECS, salaryFor, SIM, stageAt } from './tuning';
 import {
   Candidate, Developer, Discipline, DISCIPLINES, Level, LEVELS,
   ProficiencyMap, RunState, Severity, Ticket, TicketType,
@@ -78,6 +78,23 @@ function rollProficiency(rng: Rng, level: Level): ProficiencyMap {
   return map;
 }
 
+/**
+ * Where a rolled Candidate is from, and the salary multiplier that comes with
+ * it (CONTEXT.md: Office, Remote Countries). Neutral (null, 1x) before a Work
+ * Mode is chosen -- Garage-stage rolls are unaffected.
+ */
+function rollWorkplaceOrigin(state: RunState, rng: Rng): { country: string | null; salaryMultiplier: number } {
+  const wp = state.workplace;
+  if (wp.mode === 'inperson' && wp.officeCity) {
+    return { country: null, salaryMultiplier: OFFICE_CITIES[wp.officeCity].salaryMultiplier };
+  }
+  if (wp.mode === 'remote' && wp.unlockedCountries.length > 0) {
+    const country = rng.pick(wp.unlockedCountries)!;
+    return { country, salaryMultiplier: REMOTE_COUNTRIES[country].salaryMultiplier };
+  }
+  return { country: null, salaryMultiplier: 1 };
+}
+
 export function rollCandidate(state: RunState, rng: Rng): Candidate {
   const level = rng.weighted(Object.entries(SIM.levelWeights) as Array<[Level, number]>)!;
   const proficiency = rollProficiency(rng, level);
@@ -88,15 +105,19 @@ export function rollCandidate(state: RunState, rng: Rng): Candidate {
     ...state.candidates.map((c) => c.handle),
   ];
 
+  const { country, salaryMultiplier } = rollWorkplaceOrigin(state, rng);
+  const baseSalary = salaryFor(level, state.stageIndex, rng.next());
+
   return {
     id: nextId(state, 'c'),
     handle: developerHandle(name, taken),
     name,
     level,
     proficiency,
-    salary: salaryFor(level, state.stageIndex, rng.next()),
+    salary: Math.round(baseSalary * salaryMultiplier),
     blurb,
     expiresDay: state.day + rng.int(...SIM.candidateLifespan),
+    country,
   };
 }
 
@@ -115,6 +136,7 @@ export function rollFounder(state: RunState, rng: Rng): Developer {
     currentTicketId: null,
     noticeDaysLeft: null,
     joinedDay: 0,
+    country: null,
   };
 }
 
@@ -130,6 +152,7 @@ export function hireCandidate(state: RunState, candidate: Candidate): Developer 
     currentTicketId: null,
     noticeDaysLeft: null,
     joinedDay: state.day,
+    country: candidate.country,
   };
 }
 

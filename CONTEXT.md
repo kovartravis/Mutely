@@ -115,6 +115,11 @@ _Avoid_: id, slug, tag
 **Command**:
 A typed instruction in the terminal. Commands are the only way to change game state.
 
+**Focus**:
+A Ticket type (Bug, Feature, or Tech Debt) that standing auto-assign steers the team toward. A
+strong preference, not a filter -- a Developer falls back to the next-best work of any type rather
+than sit idle when nothing of the focused type is open.
+
 **Telemetry**:
 The always-visible read-only panels -- finances, team, board, event feed. Telemetry never accepts
 input.
@@ -184,4 +189,41 @@ spawn a Bug of its own -- an upkeep loop, not a one-time purchase.
 **Promotable**:
 A Developer whose Proficiency in their top Discipline has crossed the threshold for their next
 Level. Derived, not stored -- like Discipline itself. `/promote` commits it: base Velocity rises a
-tier, salary scales with it, and Morale gets a real boost.
+tier, salary scales with it, and Morale gets a real boost. Staff's threshold is deliberately far
+above Senior's -- it is meant to be rare, not a formality of continued play.
+
+**Target Mix**:
+The share of the team each Level is meant to hold -- a pyramid, not an even split. Promotion is
+never blocked by it, but a Level sitting above its Target Mix raises Market Pull for everyone
+at that Level.
+
+**Market Pull**:
+A standing chance that a Senior or Staff Developer gives Notice, independent of Morale -- a small
+baseline even at the Target Mix, rising further the more that Level exceeds it. The only Pressure
+that isn't caused by something the player did wrong; it's why the team never gets to stop hiring.
+Retained the same way as a Morale-driven Notice: `/raise` or `/bonus` during the window.
+_Avoid_: poaching, attrition (Attrition is the general outcome; Market Pull is this specific cause)
+
+### Workplace
+
+**Work Mode**:
+The company's organizing choice, In-person or Remote -- forced the moment the company enters Seed,
+mirroring Architecture. Switchable later, but never casually: a switch costs cash, days of reduced
+Velocity, and an immediate (non-retainable) loss of some current staff who don't want to make the
+move.
+
+**Office** (In-person):
+A single fictional City, each with its own rent, salary expectation, and candidate pool -- and a
+headcount capacity that must be expanded (at cost) to keep hiring past it. Relocating to a
+different City later reuses the Migration-style mechanism, without the staff loss a full Work Mode
+switch carries.
+
+**Remote Countries**:
+The set of countries a Remote company has unlocked for hiring, each with its own unlock cost,
+salary expectation, and candidate pool -- unlike Office, more than one can be active at once, and
+unlocking a new one is additive, not disruptive.
+
+**Coordination Drag**:
+The ongoing cost of being Remote: Velocity is dragged down by how many countries currently have an
+active hire, the same shape as Tech Debt's Drag. Concentrating hiring in fewer countries keeps it
+low; spreading wide for a bigger pool costs real throughput.

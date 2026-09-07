@@ -6,18 +6,20 @@
  */
 
 import {
-  cacheCost, computeCost, computeEfficiency, daysRemaining, dbCost, dbEfficiency, debtInflation,
-  effectiveCapacity, effectiveSeverity, effectiveVelocity, finances, infraCost, isOpen,
-  utilization, velocityMultiplier,
+  cacheCost, coordinationDrag, computeCost, computeEfficiency, daysRemaining, dbCost, dbEfficiency,
+  debtInflation, effectiveCapacity, effectiveSeverity, effectiveVelocity, finances, infraCost, isOpen,
+  levelShare, officeCost, utilization, velocityMultiplier,
 } from './economy';
 import { resolveCandidate, resolveDeveloper, resolveTicket } from './handles';
 import { hireCandidate, isPromotable, nextLevel, topDiscipline } from './roll';
 import { idleDevelopers, planAssignments, ticketValue } from './triage';
-import { DB_ENGINE_SPECS, INFRA, RUNTIME_SPECS, SIM, stageAt, STAGES } from './tuning';
+import {
+  DB_ENGINE_SPECS, INFRA, OFFICE_CITIES, REMOTE_COUNTRIES, RUNTIME_SPECS, SIM, stageAt, STAGES, WORKPLACE,
+} from './tuning';
 import { pushEvent } from './tick';
 import {
-  ARCHITECTURES, Architecture, DB_ENGINES, DbEngine, Developer, DISCIPLINES, PendingChange,
-  RunState, RUNTIMES, Runtime, Ticket,
+  ARCHITECTURES, Architecture, DB_ENGINES, DbEngine, Developer, DISCIPLINES, LEVELS, PendingChange,
+  RunState, RUNTIMES, Runtime, Ticket, TicketType, WORK_MODES, WorkMode, WorkplacePending,
 } from './types';
 
 export type Effect =
@@ -26,7 +28,7 @@ export type Effect =
   | { kind: 'list_saves' }
   | { kind: 'delete_save'; name: string }
   | { kind: 'restart' }
-  | { kind: 'toggle_overlay'; overlay: 'architecture' };
+  | { kind: 'toggle_overlay'; overlay: 'architecture' | 'office' | 'remote' };
 
 export interface CommandResult {
   state: RunState;
@@ -40,6 +42,7 @@ export interface CommandSpec {
     'dev' | 'candidate' | 'ticket' | 'number' | 'text' | 'speed' | 'save' | 'automode'
     | 'architecture' | 'infratarget' | 'confirm' | 'boardfilter' | 'switchaxis'
     | 'dbengine' | 'runtime' | 'cacheaction'
+    | 'workmode' | 'workmodearg' | 'officeaction' | 'city' | 'remoteaction' | 'country'
   >;
   summary: string;
 }
@@ -53,7 +56,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: '/dev',      args: ['dev'],               summary: 'detail on one developer' },
   { name: '/assign',   args: ['dev', 'ticket'],     summary: 'put a developer on a ticket' },
   { name: '/unassign', args: ['dev'],               summary: 'take a developer off their ticket' },
-  { name: '/auto',     args: ['automode'],          summary: 'keep idle developers assigned (off | once)' },
+  { name: '/auto',     args: ['automode'],          summary: 'keep idle developers assigned (off | once | bug | feature | debt | all)' },
   { name: '/hire',     args: ['candidate'],         summary: 'candidates, or hire one' },
   { name: '/fire',     args: ['dev'],               summary: 'let a developer go (1 month severance)' },
   { name: '/promote',  args: ['dev'],               summary: 'promote a developer once eligible' },
@@ -71,6 +74,9 @@ export const COMMANDS: CommandSpec[] = [
   { name: '/migrate',     args: ['architecture', 'confirm'], summary: 'switch architecture (costly, takes days)' },
   { name: '/switch',      args: ['switchaxis', 'dbengine', 'confirm'], summary: 'switch database engine or runtime' },
   { name: '/cache',       args: ['cacheaction'],             summary: 'buy, upgrade, or refresh the cache' },
+  { name: '/workmode',    args: ['workmode', 'workmodearg', 'confirm'], summary: 'view or choose/switch In-person vs Remote' },
+  { name: '/office',      args: ['officeaction', 'city', 'confirm'],     summary: 'view, expand, or relocate the office' },
+  { name: '/remote',      args: ['remoteaction', 'country'],             summary: 'view or unlock a hiring country' },
   { name: '/seed',     args: [],                    summary: 'show this run seed' },
   { name: '/restart',  args: [],                    summary: 'abandon this run and start over' },
 ];
@@ -100,6 +106,18 @@ function describePending(pending: PendingChange): string {
 
 function pendingLabel(pending: PendingChange | null): string {
   return pending ? `  -> ${describePending(pending)}` : '';
+}
+
+function describeWorkplacePending(pending: WorkplacePending): string {
+  if (pending.kind === 'relocate') {
+    return `relocating to ${OFFICE_CITIES[pending.target].label} (${pending.daysLeft}d left)`;
+  }
+  const dest = pending.target === 'inperson' ? `In-person (${OFFICE_CITIES[pending.destCity ?? '']?.label ?? pending.destCity})` : 'Remote';
+  return `switching to ${dest} (${pending.daysLeft}d left)`;
+}
+
+function workplacePendingLabel(pending: WorkplacePending | null): string {
+  return pending ? `  -> ${describeWorkplacePending(pending)}` : '';
 }
 
 /** Tickets stop showing up in the bare /board's "hidden" count past this age. */
@@ -140,6 +158,11 @@ function clone(state: RunState): RunState {
       ...state.infra,
       cache: { ...state.infra.cache },
       pending: state.infra.pending ? { ...state.infra.pending } : null,
+    },
+    workplace: {
+      ...state.workplace,
+      unlockedCountries: state.workplace.unlockedCountries.slice(),
+      pending: state.workplace.pending ? { ...state.workplace.pending } : null,
     },
   };
 }
@@ -240,6 +263,12 @@ export function apply(input: RunState, raw: string): CommandResult {
     case '/team': {
       if (state.developers.length === 0) { reply(state, 'No developers. /hire someone.'); return { state }; }
       reply(state, `TEAM  ${state.developers.length}  burn ${money(finances(state).burn)}/mo`);
+      const mix = LEVELS.map((l) => {
+        const share = levelShare(state, l);
+        const over = share > SIM.levelTarget[l] + 1e-9;
+        return `${l} ${Math.round(share * 100)}%${over ? '!' : ''} (target ${Math.round(SIM.levelTarget[l] * 100)}%)`;
+      }).join('  ·  ');
+      reply(state, `  mix   ${mix}`);
       for (const d of state.developers) reply(state, devLine(state, d));
       return { state };
     }
@@ -475,6 +504,189 @@ export function apply(input: RunState, raw: string): CommandResult {
       dev.salary = Math.round((dev.salary * ratio) / 100) * 100;
       dev.morale = Math.min(100, dev.morale + SIM.promotionMoraleBoost);
       pushEvent(state, 'good', `@${dev.handle} promoted ${oldLevel} -> ${next}. Salary ${money(oldSalary)} -> ${money(dev.salary)}/mo.`);
+
+      const share = levelShare(state, next);
+      if (share > SIM.levelTarget[next] + 1e-9) {
+        reply(
+          state,
+          `  ${next}s are now ${Math.round(share * 100)}% of the team (target ~${Math.round(SIM.levelTarget[next] * 100)}%) -- elevated Market Pull until that eases.`,
+        );
+      }
+      return { state };
+    }
+
+    case '/workmode': {
+      const wp = state.workplace;
+      const target = (args[0] ?? '').toLowerCase();
+
+      if (!target) {
+        if (wp.mode === null) {
+          reply(state, 'WORK MODE  not yet chosen -- the clock will not run again until you decide.');
+          reply(state, `  /workmode inperson <city>   fixed office overhead, smaller local pool  (${Object.keys(OFFICE_CITIES).join(', ')})`);
+          reply(state, '  /workmode remote             no office, pay to unlock hiring countries');
+          return { state };
+        }
+        if (wp.mode === 'inperson') {
+          reply(state, `WORK MODE  IN-PERSON  ${OFFICE_CITIES[wp.officeCity!].label}${workplacePendingLabel(wp.pending)}`);
+          reply(state, '/office for detail  ·  /workmode remote <confirm> to switch (costly)');
+        } else {
+          reply(state, `WORK MODE  REMOTE  ${wp.unlockedCountries.length} countr${wp.unlockedCountries.length === 1 ? 'y' : 'ies'} unlocked${workplacePendingLabel(wp.pending)}`);
+          reply(state, '/remote for detail  ·  /workmode inperson <city> confirm to switch (costly)');
+        }
+        return { state };
+      }
+
+      if (!WORK_MODES.includes(target as WorkMode)) {
+        fail(state, `Usage: /workmode <${WORK_MODES.join('|')}> [city] [confirm]`);
+        return { state };
+      }
+      const mode = target as WorkMode;
+
+      // The forced first choice at Seed: free and immediate -- nothing to switch from yet.
+      if (wp.mode === null) {
+        if (mode === 'inperson') {
+          const cityKey = (args[1] ?? '').toLowerCase();
+          if (!OFFICE_CITIES[cityKey]) {
+            fail(state, `Usage: /workmode inperson <city>. Cities: ${Object.keys(OFFICE_CITIES).join(', ')}.`);
+            return { state };
+          }
+          wp.mode = 'inperson';
+          wp.officeCity = cityKey;
+          pushEvent(state, 'good', `Going In-person, based in ${OFFICE_CITIES[cityKey].label}. /office to manage it.`);
+        } else {
+          wp.mode = 'remote';
+          wp.unlockedCountries = ['kestria'];
+          pushEvent(state, 'good', `Going Remote, starting from ${REMOTE_COUNTRIES.kestria.label}. /remote to unlock more countries.`);
+        }
+        return { state };
+      }
+
+      // A real switch later: costly, takes days, and some current staff leave outright.
+      if (wp.pending) { fail(state, `Already ${describeWorkplacePending(wp.pending)}. Wait for it to finish.`); return { state }; }
+      if (mode === wp.mode) { fail(state, `Already ${mode === 'inperson' ? 'In-person' : 'Remote'}.`); return { state }; }
+
+      let cityKey: string | null = null;
+      if (mode === 'inperson') {
+        cityKey = (args[1] ?? '').toLowerCase();
+        if (!OFFICE_CITIES[cityKey]) {
+          fail(state, `Usage: /workmode inperson <city> confirm. Cities: ${Object.keys(OFFICE_CITIES).join(', ')}.`);
+          return { state };
+        }
+      }
+
+      const cost = WORKPLACE.modeSwitch.costBase + WORKPLACE.modeSwitch.costPerDeveloper * state.developers.length;
+      const confirmIdx = mode === 'inperson' ? 2 : 1;
+      const confirmed = (args[confirmIdx] ?? '').toLowerCase() === 'confirm';
+
+      if (!confirmed) {
+        reply(state, `SWITCH WORK MODE  ${wp.mode.toUpperCase()} -> ${mode.toUpperCase()}`);
+        reply(state, `  cost         ${money(cost)}`);
+        reply(state, `  duration     ${WORKPLACE.modeSwitch.days[0]}-${WORKPLACE.modeSwitch.days[1]} days at ${(WORKPLACE.modeSwitch.velocityPenalty * 100).toFixed(0)}% team velocity`);
+        reply(state, `  staff        each current developer has a ${(WORKPLACE.modeSwitch.staffLossChance * 100).toFixed(0)}% chance to leave rather than make the move`);
+        reply(state, `  confirm with /workmode ${mode}${cityKey ? ` ${cityKey}` : ''} confirm`);
+        return { state };
+      }
+      if (state.cash < cost) { fail(state, `Need ${money(cost)}; you have ${money(state.cash)}.`); return { state }; }
+
+      state.cash -= cost;
+      const days = Math.round((WORKPLACE.modeSwitch.days[0] + WORKPLACE.modeSwitch.days[1]) / 2);
+      wp.pending = { kind: 'mode', target: mode, destCity: cityKey, daysLeft: days };
+      pushEvent(state, 'alarm', `Work Mode switch to ${mode === 'inperson' ? 'In-person' : 'Remote'} started. ${money(cost)} charged. ${days} days at reduced velocity.`);
+      return { state };
+    }
+
+    case '/office': {
+      const wp = state.workplace;
+      if (wp.mode !== 'inperson' || !wp.officeCity) {
+        fail(state, wp.mode === 'remote' ? 'You are Remote -- see /remote.' : 'Choose a Work Mode first: /workmode.');
+        return { state };
+      }
+      const action = (args[0] ?? '').toLowerCase();
+      const city = OFFICE_CITIES[wp.officeCity];
+
+      if (!action) {
+        reply(state, `OFFICE  ${city.label}${workplacePendingLabel(wp.pending)}`);
+        reply(state, `  headcount   ${state.developers.length} / ${wp.officeSize} seats`);
+        reply(state, `  rent        ${money(officeCost(wp))}/mo`);
+        reply(state, `  candidates  local pool bonus +${city.poolBonus}, salary x${city.salaryMultiplier.toFixed(2)}`);
+        reply(state, 'Usage: /office expand | relocate <city> [confirm]');
+        return { state, effect: { kind: 'toggle_overlay', overlay: 'office' } };
+      }
+
+      if (action === 'expand') {
+        const cost = WORKPLACE.officeExpandSeats * WORKPLACE.officeExpandCostPerSeat;
+        if (state.cash < cost) { fail(state, `Need ${money(cost)}; you have ${money(state.cash)}.`); return { state }; }
+        state.cash -= cost;
+        wp.officeSize += WORKPLACE.officeExpandSeats;
+        pushEvent(state, 'good', `Office expanded to ${wp.officeSize} seats. ${money(cost)} charged.`);
+        return { state };
+      }
+
+      if (action === 'relocate') {
+        if (wp.pending) { fail(state, `Already ${describeWorkplacePending(wp.pending)}. Wait for it to finish.`); return { state }; }
+        const targetKey = (args[1] ?? '').toLowerCase();
+        if (!OFFICE_CITIES[targetKey]) { fail(state, `Usage: /office relocate <city>. Cities: ${Object.keys(OFFICE_CITIES).join(', ')}.`); return { state }; }
+        if (targetKey === wp.officeCity) { fail(state, `Already based in ${city.label}.`); return { state }; }
+
+        const cost = WORKPLACE.relocate.costBase + officeCost(wp) * WORKPLACE.relocate.costMonthsOfRent;
+        const confirmed = (args[2] ?? '').toLowerCase() === 'confirm';
+        if (!confirmed) {
+          reply(state, `RELOCATE ${city.label.toUpperCase()} -> ${OFFICE_CITIES[targetKey].label.toUpperCase()}`);
+          reply(state, `  cost         ${money(cost)}`);
+          reply(state, `  duration     ${WORKPLACE.relocate.days[0]}-${WORKPLACE.relocate.days[1]} days at ${(WORKPLACE.relocate.velocityPenalty * 100).toFixed(0)}% team velocity`);
+          reply(state, `  confirm with /office relocate ${targetKey} confirm`);
+          return { state };
+        }
+        if (state.cash < cost) { fail(state, `Need ${money(cost)}; you have ${money(state.cash)}.`); return { state }; }
+        state.cash -= cost;
+        const days = Math.round((WORKPLACE.relocate.days[0] + WORKPLACE.relocate.days[1]) / 2);
+        wp.pending = { kind: 'relocate', target: targetKey, daysLeft: days };
+        pushEvent(state, 'alarm', `Relocating to ${OFFICE_CITIES[targetKey].label}. ${money(cost)} charged. ${days} days at reduced velocity.`);
+        return { state };
+      }
+
+      fail(state, 'Usage: /office expand | relocate <city> [confirm]');
+      return { state };
+    }
+
+    case '/remote': {
+      const wp = state.workplace;
+      if (wp.mode !== 'remote') {
+        fail(state, wp.mode === 'inperson' ? 'You are In-person -- see /office.' : 'Choose a Work Mode first: /workmode.');
+        return { state };
+      }
+      const action = (args[0] ?? '').toLowerCase();
+
+      if (!action) {
+        reply(state, `REMOTE  ${wp.unlockedCountries.length} countr${wp.unlockedCountries.length === 1 ? 'y' : 'ies'} unlocked  ·  coordination drag ${coordinationDrag(state).toFixed(2)}x`);
+        for (const key of wp.unlockedCountries) {
+          const c = REMOTE_COUNTRIES[key];
+          const here = state.developers.filter((d) => d.country === key).length;
+          reply(state, `  ${pad(c.label, 12)}${padL(String(here), 3)} hired  ·  salary x${c.salaryMultiplier.toFixed(2)}  ·  pool +${c.poolBonus}`);
+        }
+        const locked = Object.entries(REMOTE_COUNTRIES).filter(([k]) => !wp.unlockedCountries.includes(k));
+        if (locked.length > 0) {
+          reply(state, 'LOCKED');
+          for (const [key, c] of locked) {
+            reply(state, `  ${pad(c.label, 12)}unlock ${money(c.unlockCost)}  ·  salary x${c.salaryMultiplier.toFixed(2)}  ·  pool +${c.poolBonus}  ·  /remote unlock ${key}`);
+          }
+        }
+        return { state, effect: { kind: 'toggle_overlay', overlay: 'remote' } };
+      }
+
+      if (action === 'unlock') {
+        const key = (args[1] ?? '').toLowerCase();
+        if (!REMOTE_COUNTRIES[key]) { fail(state, `Usage: /remote unlock <country>. Countries: ${Object.keys(REMOTE_COUNTRIES).join(', ')}.`); return { state }; }
+        if (wp.unlockedCountries.includes(key)) { fail(state, `${REMOTE_COUNTRIES[key].label} is already unlocked.`); return { state }; }
+        const cost = REMOTE_COUNTRIES[key].unlockCost;
+        if (state.cash < cost) { fail(state, `Need ${money(cost)}; you have ${money(state.cash)}.`); return { state }; }
+        state.cash -= cost;
+        wp.unlockedCountries = [...wp.unlockedCountries, key];
+        pushEvent(state, 'good', `Unlocked hiring in ${REMOTE_COUNTRIES[key].label}. ${money(cost)} charged.`);
+        return { state };
+      }
+
+      fail(state, 'Usage: /remote unlock <country>');
       return { state };
     }
 
@@ -540,31 +752,41 @@ export function apply(input: RunState, raw: string): CommandResult {
 
     case '/auto': {
       const mode = (args[0] ?? '').toLowerCase();
+      const FOCUS_KEYWORDS: Record<string, TicketType> = { bug: 'bug', feature: 'feature', debt: 'tech_debt' };
 
       if (mode === 'off') {
         state.autoAssign = false;
         reply(state, 'Auto-assign OFF. Developers will idle until you /assign them.');
         return { state };
       }
-      if (mode && mode !== 'once' && mode !== 'on') {
-        fail(state, `Unknown option "${mode}". Usage: /auto [off | once]`);
+      if (mode === 'all') {
+        state.autoFocus = null;
+      } else if (mode in FOCUS_KEYWORDS) {
+        state.autoFocus = FOCUS_KEYWORDS[mode];
+      } else if (mode && mode !== 'once' && mode !== 'on') {
+        fail(state, `Unknown option "${mode}". Usage: /auto [off | once | all | bug | feature | debt]`);
         return { state };
       }
 
-      // Bare /auto (and /auto on) leaves the mode running; /auto once does not.
+      // Bare /auto (and /auto on/all/a focus type) leaves the mode running;
+      // /auto once does not. Focus itself persists independent of the on/off
+      // toggle, so turning auto back on later resumes whatever it was last set to.
       if (mode !== 'once') state.autoAssign = true;
+
+      const focus = state.autoFocus;
+      const focusLabel = focus ? `  focus: ${focus === 'tech_debt' ? 'DEBT' : focus.toUpperCase()}` : '';
 
       const idle = idleDevelopers(state);
       if (idle.length === 0) {
-        reply(state, `Everyone is already working.${state.autoAssign ? ' Auto-assign ON.' : ''}`);
+        reply(state, `Everyone is already working.${state.autoAssign ? ` Auto-assign ON.${focusLabel}` : ''}`);
         return { state };
       }
 
-      const plan = planAssignments(state, idle);
+      const plan = planAssignments(state, idle, focus);
       if (plan.length === 0) {
         reply(
           state,
-          `Nothing to assign -- ${idle.length} idle, no open unclaimed tickets.${state.autoAssign ? ' Auto-assign ON; they will be picked up as work arrives.' : ''}`,
+          `Nothing to assign -- ${idle.length} idle, no open unclaimed tickets.${state.autoAssign ? ` Auto-assign ON; they will be picked up as work arrives.${focusLabel}` : ''}`,
         );
         return { state };
       }
@@ -576,13 +798,14 @@ export function apply(input: RunState, raw: string): CommandResult {
         target.assignedTo = dev.id;
         target.status = 'in_progress';
 
-        reply(state, `  @${pad(dev.handle, 10)}-> #${pad(target.handle, 4)} ${TYPE_LABEL[target.type]} ${target.title}`);
+        const onFocus = focus && target.type === focus ? ' ★' : '';
+        reply(state, `  @${pad(dev.handle, 10)}-> #${pad(target.handle, 4)} ${TYPE_LABEL[target.type]}${onFocus} ${target.title}`);
         reply(state, `  ${' '.repeat(10)}   ${target.discipline} ${Math.round(dev.proficiency[target.discipline])} · ${money(value)}/day · ~${days}d`);
       }
 
       const stillIdle = idle.length - plan.length;
       const tail = state.autoAssign
-        ? 'Auto-assign ON -- /auto off to stop.'
+        ? `Auto-assign ON -- /auto off to stop.${focusLabel}`
         : 'Override with /assign.';
       reply(
         state,
@@ -613,6 +836,11 @@ export function apply(input: RunState, raw: string): CommandResult {
       }
       const c = resolveCandidate(state, args[0]);
       if (!c) { fail(state, `No candidate "${args[0]}". Try /hire with no arguments.`); return { state }; }
+      const wp = state.workplace;
+      if (wp.mode === 'inperson' && state.developers.length >= wp.officeSize) {
+        fail(state, `The office is full (${state.developers.length}/${wp.officeSize} seats). /office expand.`);
+        return { state };
+      }
       const fee = c.salary * SIM.hiringFeeMonths;
       if (state.cash < fee) { fail(state, `Need ${money(fee)} for the recruiter fee; you have ${money(state.cash)}.`); return { state }; }
 
@@ -658,6 +886,10 @@ export function apply(input: RunState, raw: string): CommandResult {
     case '/speed': {
       const v = Number(args[0]);
       if (![0, 1, 2, 4].includes(v)) { fail(state, 'Usage: /speed 0|1|2|4'); return { state }; }
+      if (v > 0 && state.stageIndex >= 1 && state.workplace.mode === null) {
+        fail(state, 'Choose a Work Mode first: /workmode inperson <city> or /workmode remote.');
+        return { state };
+      }
       state.speed = v;
       state.status = v === 0 ? 'paused' : 'running';
       reply(state, v === 0 ? 'Paused.' : `Speed ${v}x.`);
@@ -673,6 +905,10 @@ export function apply(input: RunState, raw: string): CommandResult {
 
     case '/resume': {
       if (state.status === 'won' || state.status === 'lost') { fail(state, 'This run is over. /restart'); return { state }; }
+      if (state.stageIndex >= 1 && state.workplace.mode === null) {
+        fail(state, 'Choose a Work Mode first: /workmode inperson <city> or /workmode remote.');
+        return { state };
+      }
       state.speed = state.speed || 1;
       state.status = 'running';
       reply(state, `Running at ${state.speed}x.`);

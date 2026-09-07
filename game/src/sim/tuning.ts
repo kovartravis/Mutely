@@ -60,12 +60,12 @@ export const STAGES: StageTuning[] = [
   {
     key: 'garage',
     name: 'GARAGE',
-    goalMrr: 14_000,
+    goalMrr: 12_000,
     fundingCash: 60_000,
     salaryMult: 1.0,
     points: [3, 9],
     revenuePerPoint: [70, 112],
-    baseChurn: 0.028,
+    baseChurn: 0.018,
     arrivalSp: { feature: 0.38, bug: 0.15, tech_debt: 0.09 },
     candidateRate: 0.12,
     severityWeights: { low: 4, medium: 4, high: 2, critical: 0.6 },
@@ -73,17 +73,23 @@ export const STAGES: StageTuning[] = [
     trafficSpikeChance: 0.010,
     trafficSpikeMult: [1.3, 1.8],
     arrivalTeamMultiplier: 1.15,
-    arrivalBaseSp: 0.5,
+    // Lowered from 0.5: that value was tuned specifically to force a second
+    // hire, but the harness showed it also left a solo/duo founder pinned at
+    // or just past their own capacity for months, with no slack to ever go
+    // idle and recover Morale (see moraleBaselineRecovery below). Still well
+    // above a true one-person-can-coast level -- hiring is still required --
+    // just no longer enough to make the wait for that hire itself lethal.
+    arrivalBaseSp: 0.42,
   },
   {
     key: 'seed',
     name: 'SEED',
-    goalMrr: 145_000,
+    goalMrr: 90_000,
     fundingCash: 150_000,
-    salaryMult: 1.35,
+    salaryMult: 1.0,
     points: [4, 11],
     revenuePerPoint: [112, 180],
-    baseChurn: 0.066,
+    baseChurn: 0.032,
     arrivalSp: { feature: 0.42, bug: 0.2, tech_debt: 0.12 },
     candidateRate: 0.12,
     severityWeights: { low: 3, medium: 4, high: 3, critical: 1 },
@@ -91,17 +97,17 @@ export const STAGES: StageTuning[] = [
     trafficSpikeChance: 0.012,
     trafficSpikeMult: [1.3, 2.0],
     arrivalTeamMultiplier: 1.3,
-    arrivalBaseSp: 1.8,
+    arrivalBaseSp: 0.85,
   },
   {
     key: 'series_a',
     name: 'SERIES A',
     goalMrr: 380_000,
     fundingCash: 560_000,
-    salaryMult: 1.8,
+    salaryMult: 1.05,
     points: [5, 14],
     revenuePerPoint: [196, 306],
-    baseChurn: 0.086,
+    baseChurn: 0.068,
     arrivalSp: { feature: 0.46, bug: 0.2, tech_debt: 0.12 },
     candidateRate: 0.13,
     severityWeights: { low: 2, medium: 4, high: 3.5, critical: 1.6 },
@@ -109,25 +115,29 @@ export const STAGES: StageTuning[] = [
     trafficSpikeChance: 0.013,
     trafficSpikeMult: [1.4, 2.2],
     arrivalTeamMultiplier: 1.5,
-    arrivalBaseSp: 1.0,
+    arrivalBaseSp: 0.6,
   },
   {
     key: 'ipo',
     name: 'IPO',
-    goalMrr: 680_000,
+    goalMrr: 480_000,
     fundingCash: 2_800_000,
-    salaryMult: 2.4,
+    // Lowered from 1.35 and 1.9: the harness showed IPO killing well-staffed
+    // teams (median 8-10 developers, some as large as 17) outright on burn,
+    // not on mismanagement -- a stage that's supposed to be "a genuine wall"
+    // for growth, not one a healthy team can't afford to be alive in.
+    salaryMult: 1.25,
     points: [6, 17],
     revenuePerPoint: [357, 552],
-    baseChurn: 0.074,
+    baseChurn: 0.038,
     arrivalSp: { feature: 0.5, bug: 0.23, tech_debt: 0.14 },
     candidateRate: 0.13,
     severityWeights: { low: 1.5, medium: 3.5, high: 4, critical: 2.2 },
     trafficDailyGrowth: 0.0068,
     trafficSpikeChance: 0.014,
     trafficSpikeMult: [1.4, 2.5],
-    arrivalTeamMultiplier: 1.9,
-    arrivalBaseSp: 1.2,
+    arrivalTeamMultiplier: 1.7,
+    arrivalBaseSp: 0.7,
   },
 ];
 
@@ -141,7 +151,14 @@ export const SIM = {
   baseSalary: { junior: 4_200, mid: 6_200, senior: 8_600, staff: 11_500 } as Record<Level, number>,
 
   /** Story points per Day at Proficiency 100 and Morale 100, before Drag. */
-  baseVelocity: { junior: 1.4, mid: 2.1, senior: 2.9, staff: 3.8 } as Record<Level, number>,
+  /**
+   * Senior is raised from its original 2.9: Staff is now genuinely rare
+   * (Promotable threshold 98, plus Market Pull), so Senior -- not Staff -- is
+   * the realistic ceiling most of the team reaches. Every Stage's difficulty
+   * was tuned assuming aggregate velocity that used to include frequent Staff
+   * promotions; Senior needs to close most of that gap on its own now.
+   */
+  baseVelocity: { junior: 1.4, mid: 2.1, senior: 3.6, staff: 4.2 } as Record<Level, number>,
 
   /** Proficiency scales Velocity between these bounds (0 prof -> 0.2x, 100 -> 1.0x). */
   proficiencyFloor: 0.25,
@@ -171,8 +188,17 @@ export const SIM = {
    * Recovered every Day, working or not. Without this, drain always exceeds
    * recovery for a permanently-assigned team and Morale decays to zero no matter
    * how well the player plays -- there has to be a sustainable equilibrium.
+   *
+   * Raised from 0.45: a small early team that's genuinely too busy to ever go
+   * idle (arrivalBaseSp deliberately outpaces a solo/duo founder, see below)
+   * got none of moraleIdleRecovery's cushion either, so a run of ordinary bad
+   * luck -- a couple of high-severity tickets in a row -- had nothing to pull
+   * Morale back before Notice, no matter how well the backlog was triaged.
+   * The balance harness caught this as a silent, slow-bleed failure mode:
+   * Garage deaths clustering around day 400+, long after the run had visibly
+   * stopped growing but well before the player could tell it was doomed.
    */
-  moraleBaselineRecovery: 0.45,
+  moraleBaselineRecovery: 0.6,
   /** Extra Morale recovered per fully idle Day. */
   moraleIdleRecovery: 1.5,
   /** Shipping is restorative, and more so for a big job. */
@@ -228,10 +254,32 @@ export const SIM = {
   /** A Feature this old is withdrawn if still untouched. Wider band for low-severity work. */
   featureExpiryDays: { low: [85, 130], medium: [65, 105], high: [50, 85], critical: [38, 65] } as Record<Severity, [number, number]>,
 
-  /** Proficiency (in the top Discipline) needed to become Promotable to the next Level. */
-  promotionThreshold: { junior: 55, mid: 75, senior: 90, staff: Infinity } as Record<Level, number>,
+  /**
+   * Proficiency (in the top Discipline) needed to become Promotable to the next
+   * Level. senior->staff is deliberately a much bigger jump than the others --
+   * Staff is meant to be rare, not something a Series A team backs into by
+   * everyone just shipping long enough.
+   */
+  promotionThreshold: { junior: 55, mid: 75, senior: 98, staff: Infinity } as Record<Level, number>,
   /** Morale gained on promotion -- real, but not a full reset. */
   promotionMoraleBoost: 15,
+
+  /**
+   * Target Mix: the share of the team each Level is meant to hold. Promotion
+   * is never blocked by it (see Market Pull below) -- it's the reference point
+   * Market Pull measures overage against.
+   */
+  levelTarget: { junior: 0.30, mid: 0.40, senior: 0.22, staff: 0.08 } as Record<Level, number>,
+
+  /**
+   * Market Pull (CONTEXT.md): a standing per-Day chance a Senior or Staff
+   * Developer gives Notice, independent of Morale. `baseline` applies even
+   * exactly at the Target Mix; `overageWeight` scales with how far that Level
+   * exceeds it. Junior and Mid have no Market Pull -- their churn stays purely
+   * Morale-driven.
+   */
+  marketPullBaseline: { junior: 0, mid: 0, senior: 0.004, staff: 0.008 } as Record<Level, number>,
+  marketPullOverageWeight: 0.06,
 
   /** Size of the Flavor buffer, and the level it refills at. */
   flavorTarget: 20,
@@ -435,3 +483,125 @@ export function disciplineWeights(): ReadonlyArray<readonly [Discipline, number]
     ['dba', 0.7],
   ];
 }
+
+/**
+ * Workplace (ADR-0006). Office and Remote are genuinely different systems, not
+ * one dial with two labels: a City is a single current choice with a headcount
+ * cap; Countries can be unlocked in parallel, trading a wider pool for
+ * Coordination Drag. "In-person decreases salary expectations, Remote
+ * increases them" is the category-level rule -- individual locations still
+ * vary around that, so a cheap remote country can beat an expensive city.
+ */
+export interface CitySpec {
+  label: string;
+  description: string;
+  /** Flat monthly rent, independent of headcount. */
+  rentBase: number;
+  /** Additional monthly rent per seat of officeSize. */
+  rentPerSeat: number;
+  salaryMultiplier: number;
+  /** Extra Candidates per Roll this City's pool tends to produce. */
+  poolBonus: number;
+}
+
+export interface CountrySpec {
+  label: string;
+  description: string;
+  /** One-time cost to unlock. The first Country a Remote company has is free. */
+  unlockCost: number;
+  salaryMultiplier: number;
+  poolBonus: number;
+}
+
+export const OFFICE_CITIES: Record<string, CitySpec> = {
+  fernhaven: {
+    label: 'Fernhaven',
+    description: 'A quiet second-tier city. Cheap rent, thinner talent pool.',
+    rentBase: 1_800,
+    rentPerSeat: 180,
+    salaryMultiplier: 0.85,
+    poolBonus: 0,
+  },
+  rivergate: {
+    label: 'Rivergate',
+    description: 'A mid-size tech hub. Balanced on every axis.',
+    rentBase: 4_000,
+    rentPerSeat: 280,
+    salaryMultiplier: 1.0,
+    poolBonus: 1,
+  },
+  meridian: {
+    label: 'Meridian',
+    description: 'The expensive capital. Deep bench, deep rent.',
+    rentBase: 9_000,
+    rentPerSeat: 420,
+    salaryMultiplier: 1.15,
+    poolBonus: 2,
+  },
+};
+
+export const REMOTE_COUNTRIES: Record<string, CountrySpec> = {
+  kestria: {
+    label: 'Kestria',
+    description: "Wherever the founding team already was. Always available, no unlock cost.",
+    unlockCost: 0,
+    salaryMultiplier: 1.05,
+    poolBonus: 0,
+  },
+  oakmere: {
+    label: 'Oakmere',
+    description: 'A large, well-established remote-hiring market.',
+    unlockCost: 15_000,
+    salaryMultiplier: 1.15,
+    poolBonus: 1,
+  },
+  solvane: {
+    label: 'Solvane',
+    description: 'Strong senior talent, priced accordingly.',
+    unlockCost: 35_000,
+    salaryMultiplier: 1.30,
+    poolBonus: 1,
+  },
+  tanvir: {
+    label: 'Tanvir',
+    description: 'A hot, competitive market. Excellent people, top-dollar expectations.',
+    unlockCost: 60_000,
+    salaryMultiplier: 1.45,
+    poolBonus: 2,
+  },
+};
+
+export const WORKPLACE = {
+  /** Default Office capacity granted the moment In-person is chosen. */
+  startingOfficeSize: 4,
+  /** Cost and headcount added per /office expand step. */
+  officeExpandSeats: 3,
+  officeExpandCostPerSeat: 2_200,
+
+  /** Coordination Drag (CONTEXT.md): scales with how many Countries have an active hire. */
+  coordinationDragWeight: 0.09,
+  minCoordinationDrag: 0.55,
+
+  /** Relocating the Office to a different City -- cheaper than a full Work Mode switch. */
+  relocate: {
+    costBase: 6_000,
+    costMonthsOfRent: 4,
+    days: [5, 8] as [number, number],
+    velocityPenalty: 0.75,
+  },
+
+  /**
+   * Switching Work Mode entirely. Unlike a relocation, this also costs some
+   * current staff outright -- real people don't want to be told their fully
+   * remote job just became an office job, or the reverse. Non-retainable:
+   * this isn't a Notice, it's an immediate departure roll per Developer.
+   */
+  modeSwitch: {
+    costBase: 20_000,
+    costPerDeveloper: 4_000,
+    days: [7, 11] as [number, number],
+    velocityPenalty: 0.5,
+    /** Chance any given current Developer leaves immediately when the switch completes. */
+    staffLossChance: 0.22,
+  },
+} as const;

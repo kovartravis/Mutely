@@ -3,8 +3,8 @@
  * finances in five separate handlers and they had already drifted apart.
  */
 
-import { DB_ENGINE_SPECS, INFRA, RUNTIME_SPECS, SIM, stageAt } from './tuning';
-import { Developer, Finances, Infra, RunState, Severity, Ticket } from './types';
+import { DB_ENGINE_SPECS, INFRA, OFFICE_CITIES, REMOTE_COUNTRIES, RUNTIME_SPECS, SIM, stageAt, WORKPLACE } from './tuning';
+import { Developer, Finances, Infra, Level, RunState, Severity, Ticket, Workplace } from './types';
 
 export const isOpen = (t: Ticket) => t.status !== 'done';
 
@@ -173,15 +173,68 @@ export function migrationPenalty(state: RunState): number {
   return pending.kind === 'architecture' ? INFRA.migration.velocityPenalty : INFRA.subSwitch.velocityPenalty;
 }
 
-/** Combined multiplier for anywhere Velocity is computed: Drag and Migration together. */
-export function velocityMultiplier(state: RunState): number {
-  return drag(state) * migrationPenalty(state);
+/** A pending Work Mode switch or Office relocation distracts the team, same shape as Drag. */
+export function workplacePenalty(state: RunState): number {
+  const pending = state.workplace.pending;
+  if (!pending) return 1;
+  return pending.kind === 'mode' ? WORKPLACE.modeSwitch.velocityPenalty : WORKPLACE.relocate.velocityPenalty;
 }
 
-/** PRESSURE 3: salaries and infrastructure spend both burn Cash. */
+/**
+ * Coordination Drag (CONTEXT.md): a Remote team's Velocity cost for being
+ * spread across multiple Countries. 1 while In-person, while Remote with a
+ * single active Country, or before any Work Mode is chosen.
+ */
+export function coordinationDrag(state: RunState): number {
+  if (state.workplace.mode !== 'remote') return 1;
+  const activeCountries = new Set(
+    state.developers.filter((d) => d.country !== null).map((d) => d.country),
+  ).size;
+  if (activeCountries <= 1) return 1;
+  return Math.max(
+    WORKPLACE.minCoordinationDrag,
+    1 / (1 + WORKPLACE.coordinationDragWeight * (activeCountries - 1)),
+  );
+}
+
+/** Combined multiplier for anywhere Velocity is computed. */
+export function velocityMultiplier(state: RunState): number {
+  return drag(state) * migrationPenalty(state) * workplacePenalty(state) * coordinationDrag(state);
+}
+
+/** Monthly $ cost of the Office. 0 for Remote, or before a Work Mode is chosen. */
+export function officeCost(workplace: Workplace): number {
+  if (workplace.mode !== 'inperson' || !workplace.officeCity) return 0;
+  const city = OFFICE_CITIES[workplace.officeCity];
+  return city.rentBase + city.rentPerSeat * workplace.officeSize;
+}
+
+/** Salary multiplier for the current Office City, or a given remote Country. Neutral until chosen. */
+export function workplaceSalaryMultiplier(workplace: Workplace, country: string | null): number {
+  if (workplace.mode === 'inperson' && workplace.officeCity) {
+    return OFFICE_CITIES[workplace.officeCity].salaryMultiplier;
+  }
+  if (workplace.mode === 'remote' && country) {
+    return REMOTE_COUNTRIES[country]?.salaryMultiplier ?? 1;
+  }
+  return 1;
+}
+
+/** Extra Candidates per Roll the current Workplace's pool tends to produce. */
+export function workplacePoolBonus(workplace: Workplace): number {
+  if (workplace.mode === 'inperson' && workplace.officeCity) {
+    return OFFICE_CITIES[workplace.officeCity].poolBonus;
+  }
+  if (workplace.mode === 'remote') {
+    return workplace.unlockedCountries.reduce((sum, c) => sum + (REMOTE_COUNTRIES[c]?.poolBonus ?? 0), 0);
+  }
+  return 0;
+}
+
+/** PRESSURE 3: salaries, infrastructure spend, and Office rent all burn Cash. */
 export function burn(state: RunState): number {
   const salaries = state.developers.reduce((sum, d) => sum + d.salary, 0);
-  return salaries + infraCost(state);
+  return salaries + infraCost(state) + officeCost(state.workplace);
 }
 
 export function runway(cash: number, monthlyBurn: number, mrr: number): number {
@@ -226,4 +279,24 @@ export function daysRemaining(dev: Developer, ticket: Ticket, dragMultiplier: nu
   const v = effectiveVelocity(dev, ticket, dragMultiplier);
   if (v <= 0.01) return null;
   return Math.ceil((ticket.storyPoints - ticket.progressPoints) / v);
+}
+
+/** What share of the current team sits at this Level. 0 when the team is empty. */
+export function levelShare(state: RunState, level: Level): number {
+  if (state.developers.length === 0) return 0;
+  const count = state.developers.filter((d) => d.level === level).length;
+  return count / state.developers.length;
+}
+
+/**
+ * Market Pull (CONTEXT.md): today's chance a Developer at this Level gives
+ * Notice, independent of Morale. Junior/Mid are always 0 -- only Senior and
+ * Staff face it. A baseline applies even exactly at the Target Mix; the
+ * further that Level exceeds it, the more the overage term adds.
+ */
+export function marketPullChance(state: RunState, level: Level): number {
+  const baseline = SIM.marketPullBaseline[level];
+  if (baseline === 0) return 0;
+  const overage = Math.max(0, levelShare(state, level) - SIM.levelTarget[level]);
+  return baseline + overage * SIM.marketPullOverageWeight;
 }

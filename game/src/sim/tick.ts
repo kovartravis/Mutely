@@ -8,16 +8,16 @@
 
 import {
   burn, churnRate, computeEfficiency, dbEfficiency, effectiveSeverity, effectiveVelocity,
-  requiredCapacity, utilization, velocityMultiplier,
+  levelShare, marketPullChance, requiredCapacity, utilization, velocityMultiplier, workplacePoolBonus,
 } from './economy';
 import { createRng, Rng } from './rng';
 import { rollCandidate, rollTicket } from './roll';
 import {
-  DB_ENGINE_SPECS, expectedTicketPoints, INFRA, RUNTIME_SPECS, SIM, stageAt, STAGES,
+  DB_ENGINE_SPECS, expectedTicketPoints, INFRA, OFFICE_CITIES, RUNTIME_SPECS, SIM, stageAt, STAGES, WORKPLACE,
 } from './tuning';
 import { idleDevelopers, planAssignments } from './triage';
 import {
-  Architecture, DbEngine, Developer, EventLevel, GameEvent, Runtime, RunState, Ticket, TicketType,
+  Architecture, DbEngine, Developer, EventLevel, GameEvent, Runtime, RunState, Ticket, TicketType, WorkMode,
 } from './types';
 
 const MAX_EVENTS = 400;
@@ -148,7 +148,27 @@ function doAttrition(state: RunState, rng: Rng): void {
           'alarm',
           `@${dev.handle} gave notice -- leaving in ${dev.noticeDaysLeft} days. /raise or /bonus to retain.`,
         );
+        continue; // already gave notice today; don't also roll Market Pull
       }
+    }
+
+    // Market Pull (CONTEXT.md): Senior/Staff can be recruited away regardless
+    // of Morale -- the one Pressure that isn't caused by anything the player
+    // did wrong. Reuses the same Notice/retention path as morale-driven churn.
+    // Junior/Mid never reach this: rng.chance() always consumes a draw even at
+    // p=0, and calling it unconditionally for every Developer every Day would
+    // desync the whole downstream RNG stream (candidate rolls, ticket rolls,
+    // traffic spikes) from what a Seed produced before Market Pull existed.
+    const pullChance = marketPullChance(state, dev.level);
+    if (pullChance > 0 && rng.chance(pullChance)) {
+      dev.noticeDaysLeft = rng.int(...SIM.noticeDays);
+      const share = Math.round(levelShare(state, dev.level) * 100);
+      const target = Math.round(SIM.levelTarget[dev.level] * 100);
+      pushEvent(
+        state,
+        'alarm',
+        `@${dev.handle} is fielding outside offers -- leaving in ${dev.noticeDaysLeft} days unless retained. (${dev.level}s are ${share}% of the team, target ~${target}%)`,
+      );
     }
   }
 }
@@ -208,6 +228,53 @@ function doPendingChange(state: RunState): void {
   } else {
     infra.runtime = pending.target as Runtime;
     pushEvent(state, 'good', `Runtime switch complete -- now running ${RUNTIME_SPECS[infra.runtime].label}.`);
+  }
+}
+
+/**
+ * Advances a pending Workplace change (ADR-0006): either an Office
+ * relocation, or a full Work Mode switch. Completes it once its Days run out.
+ * A relocation is disruptive only in Velocity; a mode switch also costs some
+ * current staff outright -- non-retainable, decided the moment it lands.
+ */
+function doWorkplaceChange(state: RunState, rng: Rng): void {
+  const wp = state.workplace;
+  const pending = wp.pending;
+  if (!pending) return;
+
+  pending.daysLeft -= 1;
+  if (pending.daysLeft > 0) return;
+  wp.pending = null;
+
+  if (pending.kind === 'relocate') {
+    wp.officeCity = pending.target as string;
+    pushEvent(state, 'good', `Office relocation complete -- now based in ${OFFICE_CITIES[wp.officeCity].label}.`);
+    return;
+  }
+
+  const to = pending.target as WorkMode;
+  wp.mode = to;
+  if (to === 'inperson') {
+    wp.officeCity = pending.destCity ?? Object.keys(OFFICE_CITIES)[0];
+    wp.unlockedCountries = [];
+  } else {
+    wp.officeCity = null;
+    wp.unlockedCountries = ['kestria'];
+  }
+
+  const leaving = state.developers.filter(() => rng.chance(WORKPLACE.modeSwitch.staffLossChance));
+  for (const dev of leaving) releaseTicket(state, dev);
+  const leavingIds = new Set(leaving.map((d) => d.id));
+  state.developers = state.developers.filter((d) => !leavingIds.has(d.id));
+
+  const dest = to === 'inperson' ? `In-person in ${OFFICE_CITIES[wp.officeCity!].label}` : 'Remote';
+  pushEvent(state, 'good', `Work Mode switch complete -- now ${dest}.`);
+  if (leaving.length > 0) {
+    pushEvent(
+      state,
+      'alarm',
+      `${leaving.length} developer${leaving.length === 1 ? '' : 's'} didn't want to make the move and left: ${leaving.map((d) => `@${d.handle}`).join(', ')}.`,
+    );
   }
 }
 
@@ -340,7 +407,8 @@ function doArrivals(state: RunState, rng: Rng): void {
     }
   }
 
-  if (state.candidates.length < SIM.maxCandidates && rng.chance(stage.candidateRate)) {
+  const maxCandidates = SIM.maxCandidates + workplacePoolBonus(state.workplace);
+  if (state.candidates.length < maxCandidates && rng.chance(stage.candidateRate)) {
     const candidate = rollCandidate(state, rng);
     state.candidates.push(candidate);
     pushEvent(state, 'info', `@${candidate.handle} applied -- ${candidate.level}, ${money(candidate.salary)}/mo. /hire @${candidate.handle}`);
@@ -360,7 +428,7 @@ function doAutoAssign(state: RunState): void {
   const idle = idleDevelopers(state);
   if (idle.length === 0) return;
 
-  for (const { developer, ticket, days } of planAssignments(state, idle)) {
+  for (const { developer, ticket, days } of planAssignments(state, idle, state.autoFocus)) {
     const dev = state.developers.find((d) => d.id === developer.id);
     const target = state.tickets.find((t) => t.id === ticket.id);
     if (!dev || !target) continue;
@@ -388,12 +456,24 @@ function doStageGate(state: RunState): void {
   state.cash += nextStage.fundingCash;
   pushEvent(state, 'good', `${stage.name} goal met -- ${nextStage.name} round closed, +${money(nextStage.fundingCash)}.`);
   pushEvent(state, 'info', `Next goal: ${money(nextStage.goalMrr)}/mo MRR. Salaries and churn are up.`);
+
+  if (state.workplace.mode === null) {
+    pushEvent(
+      state,
+      'alarm',
+      `Choose a Work Mode before the clock runs again: /workmode inperson <city> or /workmode remote.`,
+    );
+  }
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 export function tick(state: RunState): RunState {
   if (state.status !== 'running') return state;
+  // ADR-0006: the clock will not run again once Seed opens until a Work Mode
+  // is chosen -- mirrors how the Run starts unpaused only because that choice
+  // hasn't come up yet.
+  if (state.stageIndex >= 1 && state.workplace.mode === null) return state;
 
   const next = draft(state);
   const rng = createRng(next.rng.seed, next.rng.cursor);
@@ -408,6 +488,7 @@ export function tick(state: RunState): RunState {
   doTraffic(next, rng);
   doCache(next, rng);
   doPendingChange(next);
+  doWorkplaceChange(next, rng);
   doManagedDbAutoscale(next);
   doArrivals(next, rng);
   doAutoAssign(next);

@@ -11,7 +11,7 @@ import {
   infraCost, isOpen, velocityMultiplier,
 } from './economy';
 import { SIM, stageAt } from './tuning';
-import { Developer, RunState, Ticket } from './types';
+import { Developer, RunState, Ticket, TicketType } from './types';
 
 export interface Assignment {
   developer: Developer;
@@ -78,13 +78,26 @@ export function valuePerDay(state: RunState, dev: Developer, ticket: Ticket): nu
 }
 
 /**
+ * Added to a pair's sort key (never its displayed `value`) when its Ticket
+ * matches the active auto-Focus. Large enough to dominate any real economic
+ * value, so a focused Ticket always wins the assignment when one is open --
+ * but an idle Developer still falls back to the next-best work of any type
+ * when the focus queue is empty, rather than sitting idle.
+ */
+const FOCUS_BOOST = 1e9;
+
+/**
  * Best available pairing of the given Developers to open, unclaimed Tickets.
  *
  * Globally greedy: every pair is scored, then the highest-value pairs are taken
  * first. Assigning developer-by-developer instead lets whoever is first in the
  * array take a ticket that someone else would have cleared far faster.
  */
-export function planAssignments(state: RunState, developers: readonly Developer[]): Assignment[] {
+export function planAssignments(
+  state: RunState,
+  developers: readonly Developer[],
+  focus: TicketType | null = null,
+): Assignment[] {
   const claimed = new Set(
     state.tickets.filter((t) => t.status === 'in_progress').map((t) => t.id),
   );
@@ -92,22 +105,25 @@ export function planAssignments(state: RunState, developers: readonly Developer[
   const dragNow = velocityMultiplier(state);
 
   const pairs: Assignment[] = [];
+  const sortKeys = new Map<Assignment, number>();
   for (const dev of developers) {
     for (const ticket of open) {
       const value = valuePerDay(state, dev, ticket);
       if (value <= 0) continue;
       const velocity = effectiveVelocity(dev, ticket, dragNow);
-      pairs.push({
+      const pair: Assignment = {
         developer: dev,
         ticket,
         value,
         velocity,
         days: Math.ceil((ticket.storyPoints - ticket.progressPoints) / Math.max(velocity, 1e-6)),
-      });
+      };
+      pairs.push(pair);
+      sortKeys.set(pair, focus && ticket.type === focus ? value + FOCUS_BOOST : value);
     }
   }
 
-  pairs.sort((a, b) => b.value - a.value || a.ticket.handle.localeCompare(b.ticket.handle));
+  pairs.sort((a, b) => sortKeys.get(b)! - sortKeys.get(a)! || a.ticket.handle.localeCompare(b.ticket.handle));
 
   const takenDevs = new Set<string>();
   const takenTickets = new Set<string>();

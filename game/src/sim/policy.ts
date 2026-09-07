@@ -10,8 +10,8 @@ import {
   computeCost, computeEfficiency, dbCapacity, dbEfficiency, finances,
   isOpen, rawComputeCapacity, requiredCapacity,
 } from './economy';
-import { isPromotable } from './roll';
-import { INFRA, SIM, stageAt } from './tuning';
+import { isPromotable, nextLevel } from './roll';
+import { INFRA, REMOTE_COUNTRIES, SIM, stageAt, WORKPLACE } from './tuning';
 import { RunState } from './types';
 
 /**
@@ -110,14 +110,66 @@ function infraCommands(state: RunState): string[] {
   return commands;
 }
 
+/**
+ * Reactive Office/Remote upkeep, mirroring infraCommands: expand the Office
+ * before it blocks hiring outright, or unlock the next Country once cash is
+ * comfortable. Never touches which Work Mode was chosen -- that's a one-time
+ * decision made in decide() below, the moment Seed opens.
+ */
+function workplaceCommands(state: RunState): string[] {
+  const wp = state.workplace;
+  const commands: string[] = [];
+  if (wp.mode === null || wp.pending) return commands; // one thing at a time
+
+  if (wp.mode === 'inperson') {
+    // Expand a step before the cap actually bites, not after -- a full Office
+    // blocks hiring outright, and by then a candidate may already be lost.
+    if (state.developers.length >= wp.officeSize - 1) {
+      const cost = WORKPLACE.officeExpandSeats * WORKPLACE.officeExpandCostPerSeat;
+      if (state.cash > cost * 4) commands.push('/office expand');
+    }
+  } else {
+    // Unlock the next cheapest Country once cash is comfortable -- grows the
+    // candidate pool at the cost of Coordination Drag, so this isn't free
+    // upside; it's a real trade the reference player makes deliberately.
+    const locked = Object.entries(REMOTE_COUNTRIES)
+      .filter(([key]) => !wp.unlockedCountries.includes(key))
+      .sort((a, b) => a[1].unlockCost - b[1].unlockCost);
+    if (locked[0] && state.cash > locked[0][1].unlockCost * 6) {
+      commands.push(`/remote unlock ${locked[0][0]}`);
+    }
+  }
+
+  return commands;
+}
+
 export function decide(state: RunState): string[] {
-  const commands: string[] = [...infraCommands(state)];
+  // ADR-0006: the game will not let the clock advance again until a Work Mode
+  // is chosen, so the harness must decide promptly or stall forever. Which
+  // mode is "better" isn't the point of this reference player -- deciding at
+  // all, immediately, is: In-person plus the cheapest City keeps the rest of
+  // its economics simple and predictable.
+  if (state.stageIndex >= 1 && state.workplace.mode === null) {
+    return ['/workmode inperson fernhaven'];
+  }
+
+  const commands: string[] = [...infraCommands(state), ...workplaceCommands(state)];
   const f = finances(state);
 
-  // 0. A Proficiency-eligible Developer is promoted immediately -- the raised
-  //    base Velocity is worth its proportional salary bump almost every time.
+  // 0. A Proficiency-eligible Developer is promoted -- but staggered, not
+  //    blindly maxed out. Promoting into Senior/Staff once that Level is
+  //    already well past its Target Mix just buys immediate Market Pull; a
+  //    careful player holds a ready promotion back rather than stack the team
+  //    top-heavy on purpose.
   for (const dev of state.developers) {
-    if (isPromotable(dev)) commands.push(`/promote @${dev.handle}`);
+    if (!isPromotable(dev)) continue;
+    const next = nextLevel(dev.level);
+    if (next === 'senior' || next === 'staff') {
+      const projectedCount = state.developers.filter((d) => d.level === next).length + 1;
+      const projectedShare = projectedCount / state.developers.length;
+      if (projectedShare > SIM.levelTarget[next] * 1.3) continue;
+    }
+    commands.push(`/promote @${dev.handle}`);
   }
 
   // 1. Defend Morale before it becomes Notice. A one-off bonus is preferred to a
@@ -134,16 +186,29 @@ export function decide(state: RunState): string[] {
     if (f.cash > bonus * 4) {
       commands.push(`/bonus @${dev.handle} ${bonus}`);
     } else if (urgent) {
-      // Cannot afford to buy them back outright; a modest raise is the last resort.
-      const raise = Math.min(Math.ceil((needed / SIM.moralePerRaiseK) * 1000), dev.salary * 0.2);
-      if (raise > 0 && f.cash > raise * 12) commands.push(`/raise @${dev.handle} ${Math.round(raise)}`);
+      // Cannot afford to buy them back outright with a bonus. A raise is the
+      // last resort, but it's a *permanent* burn increase -- if a raise
+      // yesterday didn't already clear the notice, retrying it daily while
+      // notice ticks down compounds (each capped at 20% of an already-raised
+      // salary) into runaway burn without ever fixing the actual problem.
+      // Cap how far above their Level's base band a retention raise will go;
+      // past that, losing them is cheaper than continuing to overpay.
+      const ceiling = SIM.baseSalary[dev.level] * stageAt(state.stageIndex).salaryMult * 1.6;
+      if (dev.salary < ceiling) {
+        const raise = Math.min(Math.ceil((needed / SIM.moralePerRaiseK) * 1000), dev.salary * 0.2, ceiling - dev.salary);
+        if (raise > 0 && f.cash > raise * 12) commands.push(`/raise @${dev.handle} ${Math.round(raise)}`);
+      }
     }
   }
 
   // 2. An empty team ships nothing -- hire at any price that leaves cash.
+  // A zero-headcount company earns nothing and fixes nothing every day it
+  // waits, so the bar here is just the recruiter fee itself, not a runway
+  // cushion -- waiting for a bigger buffer while burning down with no one
+  // working is strictly worse than hiring the moment it's affordable at all.
   if (state.developers.length === 0 && state.candidates.length > 0) {
     const cheapest = [...state.candidates].sort((a, b) => a.salary - b.salary)[0];
-    if (f.cash > cheapest.salary * (SIM.hiringFeeMonths + 2)) {
+    if (f.cash > cheapest.salary * SIM.hiringFeeMonths) {
       return [...commands, `/hire @${cheapest.handle}`];
     }
   }
@@ -169,7 +234,13 @@ export function decide(state: RunState): string[] {
   // growing backlog, and unaddressed Tech Debt compounding into ever-more-
   // expensive required Capacity is a death spiral no amount of infra
   // management alone can fix.
-  const runwayBar = state.developers.length <= 1 ? 6 : 15;
+  // A solo founder used to reach Staff (and its velocity boost) within a
+  // couple hundred days, which is what actually cleared this bar quickly.
+  // Staff is deliberately much harder to reach now (CONTEXT.md: Promotable),
+  // so a founder stuck at Mid-level velocity for far longer needs a thinner
+  // bar to ever cross it -- this isn't a weaker check, it's removing a
+  // dependency on a crutch that no longer exists.
+  const runwayBar = state.developers.length <= 1 ? 5 : 15;
   if (worthGrowing && !hiredRecently && state.candidates.length > 0) {
     const affordable = state.candidates
       .filter((c) => {
@@ -179,6 +250,12 @@ export function decide(state: RunState): string[] {
         return f.cash > fee * 3 && newRunway > runwayBar;
       })
       .sort((a, b) => {
+        // While the team is still tiny, cash is the scarce resource, not
+        // throughput efficiency -- bootstrap on whoever is cheapest rather
+        // than reaching for a senior/staff candidate's better velocity/dollar
+        // and straining runway on the very first hires. Once established,
+        // optimize for value per dollar like a team with room to spend would.
+        if (state.developers.length < 3) return a.salary - b.salary;
         const va = SIM.baseVelocity[a.level] / a.salary;
         const vb = SIM.baseVelocity[b.level] / b.salary;
         return vb - va;

@@ -3,7 +3,7 @@
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ARCHITECTURES, COMMANDS, DB_ENGINE_SPECS, DB_ENGINES, effectiveSeverity, EventLevel, GameEvent,
-  isOpen, RunState, RUNTIME_SPECS, RUNTIMES, topDiscipline,
+  isOpen, OFFICE_CITIES, REMOTE_COUNTRIES, RunState, RUNTIME_SPECS, RUNTIMES, topDiscipline, WORK_MODES,
 } from '@/sim';
 
 interface TerminalProps {
@@ -70,6 +70,10 @@ function completionsFor(state: RunState, saves: string[], input: string): Comple
       return [
         { value: 'off', hint: 'stop auto-assigning' },
         { value: 'once', hint: 'assign now, do not stay on' },
+        { value: 'bug', hint: 'focus the team on bugs' },
+        { value: 'feature', hint: 'focus the team on features' },
+        { value: 'debt', hint: 'focus the team on tech debt' },
+        { value: 'all', hint: 'clear focus, back to balanced triage' },
       ].filter((c) => match(c.value));
     case 'speed':
       return ['0', '1', '2', '4'].filter(match).map((v) => ({
@@ -108,6 +112,32 @@ function completionsFor(state: RunState, saves: string[], input: string): Comple
     }
     case 'cacheaction':
       return ['buy', 'upgrade', 'refresh'].filter(match).map((v) => ({ value: v, hint: 'cache' }));
+    case 'workmode':
+      return WORK_MODES.filter(match).map((m) => ({
+        value: m, hint: m === state.workplace.mode ? 'current' : m === 'inperson' ? 'fixed office, smaller local pool' : 'no office, pay to unlock countries',
+      }));
+    case 'workmodearg': {
+      // The city/confirm slot depends on which mode was just typed.
+      const mode = tokens[1]?.toLowerCase();
+      if (mode === 'inperson') {
+        return Object.entries(OFFICE_CITIES).filter(([k]) => match(k)).map(([k, c]) => ({ value: k, hint: c.description }));
+      }
+      return ['confirm'].filter(match).map((v) => ({ value: v, hint: 'commit this change' }));
+    }
+    case 'officeaction':
+      return ['expand', 'relocate'].filter(match).map((v) => ({
+        value: v, hint: v === 'expand' ? 'add seats' : 'move to a different city',
+      }));
+    case 'city':
+      return Object.entries(OFFICE_CITIES)
+        .filter(([k]) => k !== state.workplace.officeCity && match(k))
+        .map(([k, c]) => ({ value: k, hint: c.description }));
+    case 'remoteaction':
+      return ['unlock'].filter(match).map((v) => ({ value: v, hint: 'unlock a hiring country' }));
+    case 'country':
+      return Object.entries(REMOTE_COUNTRIES)
+        .filter(([k]) => !state.workplace.unlockedCountries.includes(k) && match(k))
+        .map(([k, c]) => ({ value: k, hint: `${c.unlockCost.toLocaleString()} -- ${c.description}` }));
     default:
       return [];
   }

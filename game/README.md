@@ -63,6 +63,56 @@ eventually goes bankrupt on infra cost alone, regardless of how well tickets are
 deliberate: it's what killed the old timeout outcome (a run neither winning nor losing before the
 day cap) and replaces it with a genuine loss.
 
+## Workplace
+
+The moment the company enters Seed, the clock stops until you pick a Work Mode -- In-person or
+Remote (ADR-0006) -- mirroring how Architecture is chosen once at founding. It isn't a cosmetic
+label: the two are genuinely different systems, and switching later (`/workmode <mode> confirm`)
+costs cash, days of reduced Velocity, and some current staff outright -- non-retainably, real
+people who don't want the job they signed up for to change shape.
+
+```
+/workmode                        view the current choice, or the forced first pick
+/workmode inperson <city>        the forced first choice: pick an Office City, free
+/workmode remote                 the forced first choice: go Remote, starting from Kestria
+/workmode <mode> [city] confirm  switch later -- costly, takes days, some staff leave
+/office                          view the Office: headcount cap, rent, local pool/salary
+/office expand                   pay to raise the headcount cap
+/office relocate <city> confirm  move to a different City -- cheaper than a full switch
+/remote                          view unlocked and locked Countries, Coordination Drag
+/remote unlock <country>         pay to add a Country to the hiring pool, instantly
+```
+
+In-person carries one fictional Office City at a time (`OFFICE_CITIES` in `tuning.ts`) -- fixed
+rent that scales with headcount, a lower salary expectation, and a capacity that must be expanded
+(at cost) to keep hiring past it; a full Office refuses `/hire` outright. Remote carries a set of
+independently-unlockable Countries (`REMOTE_COUNTRIES`) -- no rent, a pricier and larger candidate
+pool, and Coordination Drag: an ongoing Velocity cost that grows with how many Countries currently
+have an active hire, the same shape as Tech Debt's Drag. Concentrating hiring keeps Drag low;
+spreading wide for a bigger pool costs real throughput.
+
+The reference player must make this choice too, immediately upon reaching Seed (In-person, the
+cheapest City), or the balance harness would stall forever at the forced pause -- a real dependency
+the harness now carries, the same way it depends on choosing a main Architecture.
+
+## Standing auto-assign and focus
+
+```
+/auto              turn on standing auto-assign, or assign idle developers right now
+/auto off           stop; developers idle until you /assign them
+/auto once          assign now without turning the mode on
+/auto bug|feature|debt   turn on, and steer the team toward one Ticket type
+/auto all           clear focus, back to balanced value-based Triage
+```
+
+Focus is a strong preference, not a hard filter: `planAssignments` (`src/sim/triage.ts`) boosts the
+focused type's sort key by a constant large enough to dominate any real economic value, so a
+matching Ticket always wins when one is open -- but a Developer never sits idle just because the
+focus queue happens to be empty; they fall back to the next-best work of any type. Focus persists
+independently of the on/off toggle, so `/auto off` then `/auto` resumes whatever focus was last set.
+The reference player never sets a focus (it always uses balanced Triage), so this has no effect on
+the balance numbers below.
+
 ## Backlog pressure
 
 Tickets arrive faster than headcount alone can absorb, and the gap widens by Stage in two ways:
@@ -101,15 +151,15 @@ for a competent human, and reports how far each Run got:
 ```
 MUTELY BALANCE  300 runs, 1600 day cap
 
-  won         145  48.3%   median day 1108
-  bankrupt    155  51.7%   median day 438
-  timeout       0   0.0%
+  won         146  48.7%   median day 856
+  bankrupt    143  47.7%   median day 531
+  timeout      11   3.7%   median MRR $180,999
 
   STAGE                 reached      cleared
-  GARAGE     ████████████████████  300    236   79%
-  SEED       ████████████████····  236    195   83%
-  SERIES A   █████████████·······  195    191   98%
-  IPO        █████████████·······  191    145   76%
+  GARAGE     ████████████████████  300    259  86%
+  SEED       █████████████████···  259    200  77%
+  SERIES A   █████████████·······  200    184  92%
+  IPO        ████████████········  184    146  79%
 ```
 
 The target is roughly a 50% overall win rate with a rising curve -- Garage as a tutorial, IPO as a
@@ -147,6 +197,36 @@ missed the main-Architecture migration check entirely -- a solo founder could st
 kubernetes, eating a large cash cost and a 50%-velocity penalty alone. Any new "don't do this while
 still tiny" guard needs to cover every trigger that shares the guard's premise, not just the ones
 added in the same edit.
+
+Adding Target Mix / Market Pull (2026-09) -- Staff becoming genuinely rare, and Senior/Staff facing a
+standing departure risk independent of Morale -- crashed the win rate to 0% before Workplace was
+even started. The chain, in order: `rng.chance()` always consumes an RNG draw even at `p=0`, so
+calling Market Pull's roll unconditionally for every Developer every Day (rather than guarding on
+`pullChance > 0`) desynced the whole downstream RNG stream from what a Seed used to produce; fixing
+that alone wasn't enough, because the entire difficulty curve had been implicitly tuned around fast
+Staff promotion's velocity boost bailing out a solo founder, so raising the Staff threshold pulled
+that crutch out from under every Stage at once (fixed by raising `SIM.baseVelocity.senior`/`staff`);
+a separate real bug in the retention-raise fallback retried an uncapped 20%-of-salary raise every Day
+Notice was active, compounding into runaway burn (fixed with a ceiling); and the candidate-sort
+policy was reaching for the best velocity/dollar even on a cash-thin first hire (fixed by sorting
+cheapest-first while the team is still tiny). That pass landed at 24% (N=300), explicitly left
+unfinished pending the Workplace feature's own economic changes.
+
+Landing Workplace (ADR-0006) dropped the number further, to ~9.7% (N=300) -- but isolating it proved
+Workplace's own costs (Office rent, the hiring-capacity gate, the City salary multiplier) were each
+independently *not* the driver: zeroing any one of them out, one at a time, reproduced the exact same
+win count. The real cause was the still-unfinished Market Pull pass above, finished in the same
+session as this note: `SIM.moraleBaselineRecovery` (0.45 -> 0.6) was the single biggest lever -- a
+small early team that's deliberately too busy to ever go idle (`arrivalBaseSp` outpaces a solo/duo
+founder on purpose) got none of `moraleIdleRecovery`'s cushion either, so ordinary bad luck had
+nothing to pull Morale back before Notice; the harness caught this as Garage deaths clustering around
+day 400+, long after a run had visibly stalled but well before it looked doomed. Garage's
+`arrivalBaseSp` (0.5 -> 0.42) and IPO's `salaryMult`/`arrivalTeamMultiplier` (1.35/1.9 -> 1.25/1.7)
+were both eased -- IPO in particular was bankrupting well-staffed 8-17 person teams on burn alone, not
+mismanagement. The reference player's zero-headcount hire threshold was also loosened (it required a
+2-month cash cushion on top of the recruiter fee, which a team stuck at zero developers -- earning
+and fixing nothing every Day it waited -- often couldn't clear, locking the run out of its own
+recovery path). Landed at 48.7% (N=300), 48-51% stable across N=350/500/800.
 
 **2026-09-06, early-game retune.** Player feedback: the early Stages felt too easy (Garage was
 clearing 88%, Seed 98%). Tightened Garage (goal, base churn, arrival) and Seed (goal, base churn,

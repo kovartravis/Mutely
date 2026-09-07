@@ -51,9 +51,11 @@ export default function Header({ state }: { state: RunState }) {
       </div>
 
       {/* A mode that keeps acting must be visible, or the player loses track of
-          why people keep getting assigned. */}
+          why people keep getting assigned -- and what they're being steered toward. */}
       {state.autoAssign && (
-        <span className="bloom-ok" style={{ letterSpacing: '0.1em', fontSize: 11 }}>AUTO</span>
+        <span className="bloom-ok" style={{ letterSpacing: '0.1em', fontSize: 11 }}>
+          AUTO{state.autoFocus ? `·${state.autoFocus === 'tech_debt' ? 'DEBT' : state.autoFocus.toUpperCase()}` : ''}
+        </span>
       )}
       <span className="nums dim">DAY {state.day}</span>
       <span className={statusClass} style={{ letterSpacing: '0.1em', fontSize: 11 }}>{statusLabel}</span>

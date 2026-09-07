@@ -13,6 +13,8 @@ import ArchitecturePanel from '@/components/ArchitecturePanel';
 import BoardPanel from '@/components/BoardPanel';
 import Terminal from '@/components/Terminal';
 import ArchitectureOverlay from '@/components/ArchitectureOverlay';
+import OfficeOverlay from '@/components/OfficeOverlay';
+import RemoteOverlay from '@/components/RemoteOverlay';
 
 /** Real milliseconds per simulated Day at 1x. */
 const DAY_MS = 2200;
@@ -24,7 +26,7 @@ export default function GamePage() {
   // SSR -- otherwise server and client disagree and hydration fails.
   const [state, setState] = useState<RunState | null>(null);
   const [slots, setSlots] = useState<string[]>([]);
-  const [overlay, setOverlay] = useState<'none' | 'architecture'>('none');
+  const [overlay, setOverlay] = useState<'none' | 'architecture' | 'office' | 'remote'>('none');
 
   useEffect(() => {
     // Deliberate: the Run must be created after hydration. A Seed generated
@@ -158,9 +160,9 @@ export default function GamePage() {
     setState(next);
   }, []);
 
-  // Escape closes the architecture overlay -- the one thing in the game that
-  // covers the dashboard, so it gets a dedicated way out (ADR-0002: still no
-  // clicking, just a second way to dismiss besides retyping the command).
+  // Escape closes whichever overlay covers the dashboard (architecture, office,
+  // remote) -- ADR-0002: still no clicking, just a second way to dismiss
+  // besides retyping the command.
   useEffect(() => {
     if (overlay === 'none') return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOverlay('none'); };
@@ -184,6 +186,10 @@ export default function GamePage() {
 
         {overlay === 'architecture' ? (
           <ArchitectureOverlay state={state} />
+        ) : overlay === 'office' ? (
+          <OfficeOverlay state={state} />
+        ) : overlay === 'remote' ? (
+          <RemoteOverlay state={state} />
         ) : (
           <div className="stage-grid">
             <div className="left-stack">

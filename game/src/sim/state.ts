@@ -6,10 +6,10 @@
 import { emptyQueue } from './flavor';
 import { createRng } from './rng';
 import { rollFounder, rollTicket } from './roll';
-import { INFRA, STAGES } from './tuning';
+import { INFRA, STAGES, WORKPLACE } from './tuning';
 import { RunState } from './types';
 
-export const RUN_VERSION = 5;
+export const RUN_VERSION = 7;
 
 export function newRun(companyName = 'NEBULASTACK', seed = Math.floor(Math.random() * 0xffffffff)): RunState {
   const state: RunState = {
@@ -21,6 +21,7 @@ export function newRun(companyName = 'NEBULASTACK', seed = Math.floor(Math.rando
     status: 'running',
     speed: 1,
     autoAssign: false,
+    autoFocus: null,
     infra: {
       architecture: 'monolith',
       dbEngine: 'postgres',
@@ -30,6 +31,13 @@ export function newRun(companyName = 'NEBULASTACK', seed = Math.floor(Math.rando
       traffic: INFRA.trafficStart,
       trafficBaseline: INFRA.trafficStart,
       cache: { active: false, tier: 0, hitRate: 0, lastRefreshedDay: 1 },
+      pending: null,
+    },
+    workplace: {
+      mode: null,
+      officeCity: null,
+      officeSize: WORKPLACE.startingOfficeSize,
+      unlockedCountries: [],
       pending: null,
     },
     cash: STAGES[0].fundingCash,
@@ -112,6 +120,22 @@ function migrate(parsed: { version: number } & Record<string, unknown>): RunStat
     // The old migratingTo/migrationDaysLeft pair no longer exists on Infra.
     delete (state.infra as Record<string, unknown>).migratingTo;
     delete (state.infra as Record<string, unknown>).migrationDaysLeft;
+  }
+  if (state.version === 5) {
+    state = { ...state, version: 6, autoFocus: null };
+  }
+  if (state.version === 6) {
+    state = {
+      ...state,
+      version: 7,
+      workplace: {
+        mode: null,
+        officeCity: null,
+        officeSize: WORKPLACE.startingOfficeSize,
+        unlockedCountries: [],
+        pending: null,
+      },
+    };
   }
 
   return state.version === RUN_VERSION ? (state as unknown as RunState) : null;
