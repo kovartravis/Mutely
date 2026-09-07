@@ -2,8 +2,8 @@
 
 import { KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ARCHITECTURES, COMMANDS, DB_ENGINE_SPECS, DB_ENGINES, EventLevel, GameEvent, isOpen,
-  RunState, RUNTIME_SPECS, RUNTIMES, topDiscipline,
+  ARCHITECTURES, COMMANDS, DB_ENGINE_SPECS, DB_ENGINES, effectiveSeverity, EventLevel, GameEvent,
+  isOpen, RunState, RUNTIME_SPECS, RUNTIMES, topDiscipline,
 } from '@/sim';
 
 interface TerminalProps {
@@ -64,7 +64,7 @@ function completionsFor(state: RunState, saves: string[], input: string): Comple
     case 'ticket':
       return state.tickets.filter((t) => isOpen(t) && match(t.handle)).map((t) => ({
         value: `#${t.handle}`,
-        hint: `${t.type.toUpperCase()} · ${t.severity} · ${t.discipline} · ${t.storyPoints}sp · ${t.title}`,
+        hint: `${t.type.toUpperCase()} · ${effectiveSeverity(t)}${t.escalationLevel > 0 ? ` ^${t.escalationLevel}` : ''} · ${t.discipline} · ${t.storyPoints}sp · ${t.title}`,
       }));
     case 'automode':
       return [
@@ -82,10 +82,12 @@ function completionsFor(state: RunState, saves: string[], input: string): Comple
       return ARCHITECTURES.filter((a) => a !== state.infra.architecture && match(a)).map((a) => ({
         value: a, hint: 'migrate here',
       }));
-    case 'infratarget':
-      return ['compute', 'db'].filter(match).map((v) => ({
+    case 'infratarget': {
+      const targets = state.infra.dbEngine === 'managed' ? ['compute'] : ['compute', 'db'];
+      return targets.filter(match).map((v) => ({
         value: v, hint: v === 'compute' ? `${state.infra.compute} now` : `${state.infra.dbReplicas} replicas now`,
       }));
+    }
     case 'confirm':
       return ['confirm'].filter(match).map((v) => ({ value: v, hint: 'commit this change' }));
     case 'boardfilter':

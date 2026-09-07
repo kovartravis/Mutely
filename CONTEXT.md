@@ -170,7 +170,9 @@ escalating. A lost opportunity, not a growing liability -- the market moved on.
 A second choice nested under the main Architecture -- a Database engine and a Compute runtime,
 each with its own explicit trade-off (a size delta applied to every rolled Ticket, and a Capacity
 multiplier). Which Sub-architectures are available depends on the main Architecture. Switching one
-reuses the Migration mechanism, scaled down.
+reuses the Migration mechanism, scaled down. The Managed Database engine is the one exception to
+manual `/scale`: its replica count autoscales every Day on its own, at a cost premium -- the
+player never gets to under-provision it to save money.
 
 **Cache**:
 An optional layer that serves a share of Traffic before it reaches Compute or the Database,

@@ -7,7 +7,7 @@
  */
 
 import {
-  burn, churnRate, computeEfficiency, effectiveSeverity, effectiveVelocity,
+  burn, churnRate, computeEfficiency, dbEfficiency, effectiveSeverity, effectiveVelocity,
   requiredCapacity, utilization, velocityMultiplier,
 } from './economy';
 import { createRng, Rng } from './rng';
@@ -285,6 +285,21 @@ function doCache(state: RunState, rng: Rng): void {
   }
 }
 
+/**
+ * A Managed Database autoscales on its own -- replicas track required Capacity
+ * every Day, up or down, rather than the player buying a fixed count with
+ * /scale. That convenience is what the higher costMultiplier is paying for.
+ */
+function doManagedDbAutoscale(state: RunState): void {
+  const infra = state.infra;
+  if (infra.dbEngine !== 'managed') return;
+
+  const spec = DB_ENGINE_SPECS.managed;
+  const perReplica = INFRA.db.capacityPerReplica * spec.capacityMultiplier * Math.max(dbEfficiency(state), 0.01);
+  const need = requiredCapacity(state) * INFRA.db.autoscaleMargin;
+  infra.dbReplicas = Math.max(1, Math.ceil(need / perReplica));
+}
+
 /** Alerts once when the system crosses into Over Capacity (ADR-0004). */
 function doInfraAlerts(state: RunState, wasOver: boolean): void {
   const isOver = utilization(state) > 1;
@@ -308,7 +323,7 @@ function doArrivals(state: RunState, rng: Rng): void {
   // Work scales with headcount, but the per-head multiplier rises by Stage --
   // a bigger, later-stage product throws off more incoming work per engineer,
   // not just more heads. The backlog is meant to outpace hiring, not track it.
-  const scale = SIM.arrivalBaseSp + state.developers.length * stage.arrivalTeamMultiplier;
+  const scale = stage.arrivalBaseSp + state.developers.length * stage.arrivalTeamMultiplier;
 
   for (const type of ['feature', 'bug', 'tech_debt'] as TicketType[]) {
     if (!rng.chance((stage.arrivalSp[type] * scale) / avgPoints)) continue;
@@ -393,6 +408,7 @@ export function tick(state: RunState): RunState {
   doTraffic(next, rng);
   doCache(next, rng);
   doPendingChange(next);
+  doManagedDbAutoscale(next);
   doArrivals(next, rng);
   doAutoAssign(next);
   doInfraAlerts(next, wasOver);

@@ -78,7 +78,7 @@ export default function ArchitectureOverlay({ state }: { state: RunState }) {
           arrow
           label="DATABASE"
           tone={overTone}
-          value={`${DB_ENGINE_SPECS[infra.dbEngine].label} · ${infra.dbReplicas} replica${infra.dbReplicas === 1 ? '' : 's'}`}
+          value={`${DB_ENGINE_SPECS[infra.dbEngine].label} · ${infra.dbReplicas} replica${infra.dbReplicas === 1 ? '' : 's'}${infra.dbEngine === 'managed' ? ' (auto)' : ''}`}
           note={`${money(dCost)}/mo`}
         />
 

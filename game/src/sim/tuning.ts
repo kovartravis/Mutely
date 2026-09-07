@@ -47,6 +47,13 @@ export interface StageTuning {
    * product generates more incoming work per head, not just more heads.
    */
   arrivalTeamMultiplier: number;
+  /**
+   * Work created regardless of headcount, per Stage. This is the lever for
+   * "you genuinely cannot do this alone" -- unlike arrivalTeamMultiplier, it
+   * does not scale with team size, so raising it hits a team of one hard
+   * without proportionally punishing a team that already hired.
+   */
+  arrivalBaseSp: number;
 }
 
 export const STAGES: StageTuning[] = [
@@ -66,6 +73,7 @@ export const STAGES: StageTuning[] = [
     trafficSpikeChance: 0.010,
     trafficSpikeMult: [1.3, 1.8],
     arrivalTeamMultiplier: 1.15,
+    arrivalBaseSp: 0.5,
   },
   {
     key: 'seed',
@@ -75,7 +83,7 @@ export const STAGES: StageTuning[] = [
     salaryMult: 1.35,
     points: [4, 11],
     revenuePerPoint: [112, 180],
-    baseChurn: 0.074,
+    baseChurn: 0.066,
     arrivalSp: { feature: 0.42, bug: 0.2, tech_debt: 0.12 },
     candidateRate: 0.12,
     severityWeights: { low: 3, medium: 4, high: 3, critical: 1 },
@@ -83,6 +91,7 @@ export const STAGES: StageTuning[] = [
     trafficSpikeChance: 0.012,
     trafficSpikeMult: [1.3, 2.0],
     arrivalTeamMultiplier: 1.3,
+    arrivalBaseSp: 1.8,
   },
   {
     key: 'series_a',
@@ -100,6 +109,7 @@ export const STAGES: StageTuning[] = [
     trafficSpikeChance: 0.013,
     trafficSpikeMult: [1.4, 2.2],
     arrivalTeamMultiplier: 1.5,
+    arrivalBaseSp: 1.0,
   },
   {
     key: 'ipo',
@@ -109,7 +119,7 @@ export const STAGES: StageTuning[] = [
     salaryMult: 2.4,
     points: [6, 17],
     revenuePerPoint: [357, 552],
-    baseChurn: 0.080,
+    baseChurn: 0.074,
     arrivalSp: { feature: 0.5, bug: 0.23, tech_debt: 0.14 },
     candidateRate: 0.13,
     severityWeights: { low: 1.5, medium: 3.5, high: 4, critical: 2.2 },
@@ -117,6 +127,7 @@ export const STAGES: StageTuning[] = [
     trafficSpikeChance: 0.014,
     trafficSpikeMult: [1.4, 2.5],
     arrivalTeamMultiplier: 1.9,
+    arrivalBaseSp: 1.2,
   },
 ];
 
@@ -206,13 +217,6 @@ export const SIM = {
   /** Fraction of primary Proficiency they carry in a secondary Discipline. */
   secondarySpread: [0.15, 0.6] as [number, number],
 
-  /**
-   * Work created regardless of team size, so a solo founder still has a
-   * backlog. Raised well above what one hire's worth of throughput absorbs --
-   * the backlog is meant to outpace hiring, not track it 1:1.
-   */
-  arrivalBaseSp: 0.4,
-
   /** Severity nudges Ticket size within the Stage band. */
   severitySize: { low: 0.8, medium: 1.0, high: 1.2, critical: 1.45 } as Record<Severity, number>,
 
@@ -272,6 +276,8 @@ export const INFRA = {
   db: {
     capacityPerReplica: 3600,
     costPerReplica: 220,
+    /** Headroom Managed autoscaling targets, so it doesn't sit exactly at 100% and flicker. */
+    autoscaleMargin: 1.15,
   },
 
   /** Efficiency at Proficiency 0 and 100. Linear between. */
@@ -366,8 +372,12 @@ export const DB_ENGINE_SPECS: Record<DbEngine, SubArchSpec & { availableOn: Arch
     label: 'Managed',
     spDelta: 1,
     capacityMultiplier: 1.6,
-    costMultiplier: 1.35,
-    description: 'A fully managed cloud database. Excellent at scale, and it costs like it.',
+    // Higher than Postgres/Mongo's 1.0 -- the premium isn't just the query
+    // engine, it's that the player never gets to under-provision to save
+    // money (see autoscaleMargin below). Paying for exactly what you need,
+    // always, costs more than the chance to skimp.
+    costMultiplier: 1.55,
+    description: 'A fully managed cloud database -- replicas autoscale on their own. Excellent at scale, and it costs like it.',
     availableOn: ['kubernetes', 'serverless'],
   },
 };

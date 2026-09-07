@@ -1,4 +1,4 @@
-import { isOpen, RunState, Ticket } from '@/sim';
+import { effectiveSeverity, isOpen, RunState, Ticket } from '@/sim';
 import Meter from './Meter';
 
 const money = (n: number) => `$${Math.round(n).toLocaleString()}`;
@@ -34,6 +34,7 @@ export default function BoardPanel({ state }: { state: RunState }) {
               const assigned = t.assignedTo
                 ? state.developers.find((d) => d.id === t.assignedTo)
                 : null;
+              const severity = effectiveSeverity(t);
               return (
                 <div key={t.id} style={{ display: 'flex', gap: 8, whiteSpace: 'pre' }}>
                   <span className="faint" style={{ minWidth: 34 }}>#{t.handle}</span>
@@ -41,10 +42,13 @@ export default function BoardPanel({ state }: { state: RunState }) {
                     {style.label}
                   </span>
                   <span
-                    className={t.severity === 'critical' ? 'bloom-bug' : 'faint'}
-                    style={{ minWidth: 58 }}
+                    className={severity === 'critical' ? 'bloom-bug' : 'faint'}
+                    style={{ minWidth: 46 }}
                   >
-                    {t.severity}
+                    {severity}
+                  </span>
+                  <span className="bloom-warn" style={{ minWidth: 16 }}>
+                    {t.escalationLevel > 0 ? `^${t.escalationLevel}` : ''}
                   </span>
                   <span className="faint" style={{ minWidth: 58 }}>{t.discipline}</span>
                   <span className="faint nums" style={{ minWidth: 30 }}>{t.storyPoints}sp</span>
@@ -60,6 +64,9 @@ export default function BoardPanel({ state }: { state: RunState }) {
                     {t.title}
                     {t.type === 'feature' && (
                       <span className="faint"> +{money(t.revenue)}/mo</span>
+                    )}
+                    {t.type === 'feature' && t.expiresDay !== null && (
+                      <span className="faint">  exp {Math.max(0, t.expiresDay - state.day)}d</span>
                     )}
                   </span>
                 </div>

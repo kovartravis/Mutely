@@ -273,7 +273,7 @@ export function apply(input: RunState, raw: string): CommandResult {
       reply(state, `  capacity    ${Math.round(effectiveCapacity(state)).toLocaleString()} req/day  (${(u * 100).toFixed(0)}% utilized)${u > 1 ? '  OVER CAPACITY -- churn rising' : ''}`);
       if (debt > 1) reply(state, `  debt load   x${debt.toFixed(2)}  (open tech debt inflates required capacity)`);
       reply(state, `  compute     ${infra.compute} ${label}${infra.compute === 1 ? '' : 's'}  ·  ${RUNTIME_SPECS[infra.runtime].label}  ·  ${money(cCost)}/mo  ·  efficiency ${computeEfficiency(state).toFixed(2)}x (devops)`);
-      reply(state, `  database    ${infra.dbReplicas} replica${infra.dbReplicas === 1 ? '' : 's'}  ·  ${DB_ENGINE_SPECS[infra.dbEngine].label}  ·  ${money(dCost)}/mo  ·  efficiency ${dbEfficiency(state).toFixed(2)}x (dba)`);
+      reply(state, `  database    ${infra.dbReplicas} replica${infra.dbReplicas === 1 ? '' : 's'}${infra.dbEngine === 'managed' ? ' (auto)' : ''}  ·  ${DB_ENGINE_SPECS[infra.dbEngine].label}  ·  ${money(dCost)}/mo  ·  efficiency ${dbEfficiency(state).toFixed(2)}x (dba)`);
       if (cache.active) {
         reply(state, `  cache       tier ${cache.tier}  ·  ${(cache.hitRate * 100).toFixed(0)}% hit rate  ·  ${money(cacheCost(infra))}/mo  ·  refreshed ${state.day - cache.lastRefreshedDay}d ago`);
       }
@@ -303,6 +303,10 @@ export function apply(input: RunState, raw: string): CommandResult {
         infra.compute = Math.max(1, Math.round(infra.compute + delta));
         reply(state, `Compute ${before} -> ${infra.compute}. ${money(computeCost(infra))}/mo.`);
       } else {
+        if (infra.dbEngine === 'managed') {
+          fail(state, 'Managed replicas autoscale on their own -- nothing to /scale here.');
+          return { state };
+        }
         const before = infra.dbReplicas;
         infra.dbReplicas = Math.max(1, Math.round(infra.dbReplicas + delta));
         reply(state, `Database replicas ${before} -> ${infra.dbReplicas}. ${money(dbCost(infra))}/mo.`);
@@ -484,7 +488,7 @@ export function apply(input: RunState, raw: string): CommandResult {
       if (!t) { fail(state, `No ticket "${args[0] ?? ''}". Try /board.`); return { state }; }
       const dev = t.assignedTo ? state.developers.find((d) => d.id === t.assignedTo) : null;
       reply(state, `#${t.handle}  ${t.title}`);
-      reply(state, `  ${TYPE_LABEL[t.type].trim()} / ${t.severity} / ${t.discipline}   ${t.storyPoints}sp`);
+      reply(state, `  ${TYPE_LABEL[t.type].trim()} / ${effectiveSeverity(t)}${t.escalationLevel > 0 ? ` (escalated ^${t.escalationLevel})` : ''} / ${t.discipline}   ${t.storyPoints}sp`);
       reply(state, `  ${t.description}`);
       if (t.type === 'feature') reply(state, `  ships +${money(t.revenue)}/mo MRR`);
       if (t.type === 'bug') reply(state, `  raising churn by ${pct(SIM.bugChurnWeight[t.severity] * stageAt(state.stageIndex).baseChurn)}/mo while open`);

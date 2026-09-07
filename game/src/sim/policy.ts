@@ -58,13 +58,17 @@ function infraCommands(state: RunState): string[] {
     if (target < infra.compute) commands.push(`/scale compute -${infra.compute - target}`);
   }
 
+  // Managed replicas autoscale on their own (tick.ts:doManagedDbAutoscale) --
+  // issuing /scale db against it would just be refused.
   const uDb = need / Math.max(dbCapacity(infra) * dbEfficiency(state), 1);
-  if (uDb > 0.85) {
-    const target = Math.ceil(infra.dbReplicas * (uDb / 0.6));
-    if (target > infra.dbReplicas) commands.push(`/scale db +${target - infra.dbReplicas}`);
-  } else if (uDb < 0.25 && infra.dbReplicas > 1) {
-    const target = Math.max(1, Math.floor(infra.dbReplicas * (uDb / 0.5 || 1)));
-    if (target < infra.dbReplicas) commands.push(`/scale db -${infra.dbReplicas - target}`);
+  if (infra.dbEngine !== 'managed') {
+    if (uDb > 0.85) {
+      const target = Math.ceil(infra.dbReplicas * (uDb / 0.6));
+      if (target > infra.dbReplicas) commands.push(`/scale db +${target - infra.dbReplicas}`);
+    } else if (uDb < 0.25 && infra.dbReplicas > 1) {
+      const target = Math.max(1, Math.floor(infra.dbReplicas * (uDb / 0.5 || 1)));
+      if (target < infra.dbReplicas) commands.push(`/scale db -${infra.dbReplicas - target}`);
+    }
   }
 
   if (established && infra.architecture === 'monolith') {

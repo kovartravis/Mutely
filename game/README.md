@@ -40,6 +40,11 @@ that: a Database engine and a Compute runtime, each with an explicit trade-off (
 to every rolled Ticket, a Capacity multiplier) spelled out in full on `/architecture`. Which
 Database engines are available depends on the main Architecture (ADR-0005).
 
+Managed is the exception: its replicas autoscale on their own every Day (`tick.ts`:
+`doManagedDbAutoscale`), up or down, rather than the player buying a fixed count with `/scale db`
+-- which is refused outright while Managed is active. That convenience is priced into its higher
+`costMultiplier`; the player never gets the option to under-provision it to save money.
+
 Efficiency comes from team Proficiency already tracked for ticket-matching: average `devops`
 Proficiency for compute, `dba` for the database -- so senior hires pay off continuously, not just
 when an infra-flavored ticket happens to be open.
@@ -60,11 +65,19 @@ day cap) and replaces it with a genuine loss.
 
 ## Backlog pressure
 
-Tickets arrive faster than headcount alone can absorb, and the gap widens by Stage
-(`arrivalTeamMultiplier`) -- the backlog is meant to outpace hiring, not track it. An open Bug or
-Tech Debt Ticket left too long ratchets its Severity up (Escalation); an old Feature is withdrawn
-instead (lost opportunity, not a growing liability). `/board` defaults to what's actually urgent
-(escalated or near-expiry) rather than the whole pile; `/board all|bug|feature|debt|stale` filters.
+Tickets arrive faster than headcount alone can absorb, and the gap widens by Stage in two ways:
+`arrivalBaseSp` (a flat, headcount-independent floor per Stage -- this is the "you genuinely cannot
+do this alone" lever, since it doesn't scale down just because the team is small) and
+`arrivalTeamMultiplier` (per-head pressure, so a bigger team also faces a bigger inbox, not just
+more hands). Seed's `arrivalBaseSp` in particular is tuned so a solo, never-hiring player's MRR
+growth plateaus well short of the goal -- confirmed by isolating the effect with morale pinned (to
+rule out burnout-quitting as a confound): three seeded solo runs capped out around $20-26k against
+a $145k goal, and in the unlucky seed the backlog outright diverged instead of stabilizing.
+
+An open Bug or Tech Debt Ticket left too long ratchets its Severity up (Escalation); an old Feature
+is withdrawn instead (lost opportunity, not a growing liability). `/board` defaults to what's
+actually urgent (escalated or near-expiry) rather than the whole pile;
+`/board all|bug|feature|debt|stale` filters.
 
 ## Promotion
 
@@ -88,15 +101,15 @@ for a competent human, and reports how far each Run got:
 ```
 MUTELY BALANCE  300 runs, 1600 day cap
 
-  won         144  48.0%   median day 1125
-  bankrupt    156  52.0%   median day 605
+  won         145  48.3%   median day 1108
+  bankrupt    155  51.7%   median day 438
   timeout       0   0.0%
 
   STAGE                 reached      cleared
-  GARAGE     ████████████████████  300    244   81%
-  SEED       ████████████████····  244    218   89%
-  SERIES A   ███████████████·····  218    216   99%
-  IPO        ██████████████······  216    144   67%
+  GARAGE     ████████████████████  300    236   79%
+  SEED       ████████████████····  236    195   83%
+  SERIES A   █████████████·······  195    191   98%
+  IPO        █████████████·······  191    145   76%
 ```
 
 The target is roughly a 50% overall win rate with a rising curve -- Garage as a tutorial, IPO as a
@@ -148,6 +161,19 @@ were. Two things worth remembering:
   moderate churn change there mostly just tightens their IPO margin rather than failing them at
   Series A itself. Don't chase a stage's raw clear-rate number past the point where a knob stops
   visibly moving it; check the *downstream* stage instead.
+
+**2026-09-07, Seed volume tuning.** Player feedback: hiring should be *forced* by ticket volume in
+Seed, not just made economically wise. Converted `arrivalBaseSp` from a single global constant into
+a per-Stage field -- it's the headcount-independent floor, so it's the correct lever for "cannot do
+this alone" without also punishing teams that already hired (raising `arrivalTeamMultiplier`
+instead would have scaled the pain with headcount too, hurting a 6-person team almost as much as a
+solo one). First attempt (`arrivalBaseSp: 3.6`) overshot badly -- Seed's clear rate crashed to 57%
+and the reference player's own median final team size collapsed from ~35 to 8, meaning even *active
+hiring* couldn't keep pace. Backed off to `1.8`, which held Seed's clear rate at a meaningfully
+tighter 83% while team growth recovered. Verified the actual goal directly rather than trusting the
+harness's aggregate number: a probe with morale pinned (removing burnout-quitting as a confound)
+showed a realistic solo founder's MRR plateauing around $20-26k against Seed's $145k goal across
+three seeds -- confirming volume alone is the blocker, not bad luck on churn or debt.
 
 Because every Roll derives from the Run's Seed, a scenario is reproducible: `/seed` prints it, and
 the same Seed replays the same bugs on the same days.

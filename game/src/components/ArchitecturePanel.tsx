@@ -65,7 +65,7 @@ export default function ArchitecturePanel({ state }: { state: RunState }) {
           <div style={{ display: 'flex', gap: 8, whiteSpace: 'pre' }}>
             <span className="faint" style={{ minWidth: 70 }}>database</span>
             <span className="nums">
-              {infra.dbReplicas} replica{infra.dbReplicas === 1 ? '' : 's'}
+              {infra.dbReplicas} replica{infra.dbReplicas === 1 ? '' : 's'}{infra.dbEngine === 'managed' ? ' (auto)' : ''}
             </span>
             <span className="dim">{DB_ENGINE_SPECS[infra.dbEngine].label}</span>
             <span className="dim nums">{money(dbCost(infra))}/mo</span>

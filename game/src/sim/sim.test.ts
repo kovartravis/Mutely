@@ -479,3 +479,42 @@ test('a v3 save migrates and defaults to monolith', () => {
   assert.equal(loaded.infra.architecture, 'monolith');
   assert.equal(loaded.infra.compute, 1);
 });
+
+// ─── Managed database auto-scaling ────────────────────────────────────────────
+
+test('managed database replicas autoscale up with traffic, without a command', () => {
+  let state: RunState = {
+    ...started(),
+    infra: { ...started().infra, architecture: 'kubernetes', dbEngine: 'managed' },
+    mrr: 40_000,
+  };
+  const before = state.infra.dbReplicas;
+  state = { ...state, infra: { ...state.infra, trafficBaseline: state.infra.trafficBaseline * 40, traffic: state.infra.trafficBaseline * 40 } };
+  state = tick(state);
+  assert.ok(state.infra.dbReplicas > before, 'managed replicas must grow to meet a traffic surge on their own');
+});
+
+test('managed database replicas autoscale down once demand drops', () => {
+  let state: RunState = {
+    ...started(),
+    infra: { ...started().infra, architecture: 'kubernetes', dbEngine: 'managed', dbReplicas: 50 },
+  };
+  state = tick(state);
+  assert.ok(state.infra.dbReplicas < 50, 'idle-cheap replicas should shrink back down automatically');
+});
+
+test('/scale db is refused on a managed engine', () => {
+  const state: RunState = {
+    ...started(),
+    infra: { ...started().infra, architecture: 'kubernetes', dbEngine: 'managed', dbReplicas: 3 },
+  };
+  const after = apply(state, '/scale db +5').state;
+  assert.equal(after.infra.dbReplicas, 3, 'manual db scaling must not move replicas on managed');
+  assert.match(after.events.at(-1)!.text, /autoscale/);
+});
+
+test('/scale db still works normally on postgres or mongo', () => {
+  const state = started(); // monolith + postgres
+  const after = apply(state, '/scale db +2').state;
+  assert.equal(after.infra.dbReplicas, state.infra.dbReplicas + 2);
+});
